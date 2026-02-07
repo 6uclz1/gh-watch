@@ -59,8 +59,16 @@ where
                     }
                     LoopControl::Redraw
                 }
+                InputCommand::ToggleHelp => {
+                    handle_input(model, cmd);
+                    LoopControl::Redraw
+                }
                 InputCommand::ScrollUp
                 | InputCommand::ScrollDown
+                | InputCommand::PageUp
+                | InputCommand::PageDown
+                | InputCommand::JumpTop
+                | InputCommand::JumpBottom
                 | InputCommand::SelectIndex(_) => {
                     handle_input(model, cmd);
                     LoopControl::Redraw
@@ -589,5 +597,83 @@ mod tests {
         assert_eq!(model.selected, selected_before);
         assert_eq!(model.timeline_offset, offset_before);
         assert_eq!(model.status_line, status_before);
+    }
+
+    #[test]
+    fn help_toggle_requests_redraw_without_polling() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 13, 0, 0, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+        assert!(!model.help_visible);
+
+        let key = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(key))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert!(model.help_visible);
+    }
+
+    #[test]
+    fn page_down_key_updates_selection() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 14, 0, 0, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+        model.timeline_page_size = 2;
+        model.timeline = vec![
+            WatchEvent {
+                event_id: "ev1".to_string(),
+                repo: "acme/api".to_string(),
+                kind: EventKind::IssueCommentCreated,
+                actor: "dev".to_string(),
+                title: "comment".to_string(),
+                url: "https://example.com/ev1".to_string(),
+                created_at: clock.now,
+                source_item_id: "ev1".to_string(),
+            },
+            WatchEvent {
+                event_id: "ev2".to_string(),
+                repo: "acme/api".to_string(),
+                kind: EventKind::IssueCommentCreated,
+                actor: "dev".to_string(),
+                title: "comment".to_string(),
+                url: "https://example.com/ev2".to_string(),
+                created_at: clock.now,
+                source_item_id: "ev2".to_string(),
+            },
+            WatchEvent {
+                event_id: "ev3".to_string(),
+                repo: "acme/api".to_string(),
+                kind: EventKind::IssueCommentCreated,
+                actor: "dev".to_string(),
+                title: "comment".to_string(),
+                url: "https://example.com/ev3".to_string(),
+                created_at: clock.now,
+                source_item_id: "ev3".to_string(),
+            },
+        ];
+
+        let key = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(key))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert_eq!(model.selected, 2);
     }
 }

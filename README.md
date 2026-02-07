@@ -59,7 +59,11 @@ gh-watch config path
 
 - `q`: 終了
 - `r`: 手動更新
-- `↑` / `↓`: タイムライン移動
+- `?`: ヘルプ表示の ON/OFF
+- `↑` / `↓` または `j` / `k`: タイムラインを1件移動
+- `PageUp` / `PageDown`: タイムラインを1ページ移動
+- `g` / `Home`: 先頭へ移動
+- `G` / `End`: 末尾へ移動
 - `Enter`: 選択中タイムライン項目の URL を既定ブラウザで開く
 - マウス:
   - 左クリック（タイムライン左ペイン内）: 項目選択
@@ -82,7 +86,9 @@ gh-watch config path
 - Header: `status` / `last_success` / `next_poll` / `failures` / `latest_failure`
 - Main(左 70%): `Timeline`（新着順、`↑`/`↓`で選択）
 - Main(右 30%): `Watching Repositories`（`enabled=true` の repository 一覧、config 記載順）
-- Footer: キーガイド + 選択イベント URL
+- Selected: 選択イベントの要約 + URL
+- Footer: キーガイド（固定表示）
+- Overlay: `?` でヘルプ表示
 
 ## Repository Notes
 

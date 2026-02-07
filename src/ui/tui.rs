@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 
@@ -26,6 +26,11 @@ pub enum InputCommand {
     ScrollUp,
     ScrollDown,
     SelectIndex(usize),
+    PageUp,
+    PageDown,
+    JumpTop,
+    JumpBottom,
+    ToggleHelp,
     Refresh,
     OpenSelectedUrl,
     Quit,
@@ -38,6 +43,9 @@ pub struct TuiModel {
     pub watched_repositories: Vec<String>,
     pub selected: usize,
     pub timeline_offset: usize,
+    pub timeline_page_size: usize,
+    pub selected_event_key: Option<String>,
+    pub help_visible: bool,
     pub status_line: String,
     pub failure_count: u64,
     pub latest_failure: Option<FailureRecord>,
@@ -53,6 +61,9 @@ impl TuiModel {
             watched_repositories: Vec::new(),
             selected: 0,
             timeline_offset: 0,
+            timeline_page_size: 1,
+            selected_event_key: None,
+            help_visible: false,
             status_line: "starting".to_string(),
             failure_count: 0,
             latest_failure: None,
@@ -63,15 +74,44 @@ impl TuiModel {
     }
 
     pub fn push_timeline(&mut self, mut events: Vec<WatchEvent>) {
+        let previous_selected_key = self
+            .selected_event_key
+            .clone()
+            .or_else(|| self.timeline.get(self.selected).map(WatchEvent::event_key));
+
         self.timeline.append(&mut events);
         self.timeline
             .sort_by(|a, b| b.created_at.cmp(&a.created_at));
         self.timeline
             .dedup_by(|a, b| a.event_key() == b.event_key());
         self.timeline.truncate(self.limit);
-        if self.selected >= self.timeline.len() && !self.timeline.is_empty() {
+
+        if self.timeline.is_empty() {
+            self.selected = 0;
+            self.timeline_offset = 0;
+            self.selected_event_key = None;
+            return;
+        }
+
+        if let Some(key) = previous_selected_key {
+            if let Some(index) = self.timeline.iter().position(|ev| ev.event_key() == key) {
+                self.selected = index;
+            } else if self.selected >= self.timeline.len() {
+                self.selected = self.timeline.len() - 1;
+            }
+        } else if self.selected >= self.timeline.len() {
             self.selected = self.timeline.len() - 1;
         }
+
+        self.sync_selected_event_key();
+    }
+
+    fn sync_selected_event_key(&mut self) {
+        self.selected_event_key = self.timeline.get(self.selected).map(WatchEvent::event_key);
+    }
+
+    fn page_size(&self) -> usize {
+        self.timeline_page_size.max(1)
     }
 }
 
@@ -79,9 +119,14 @@ pub fn parse_input(key: KeyEvent) -> InputCommand {
     match key.code {
         KeyCode::Char('q') => InputCommand::Quit,
         KeyCode::Char('r') => InputCommand::Refresh,
+        KeyCode::Char('?') => InputCommand::ToggleHelp,
         KeyCode::Enter => InputCommand::OpenSelectedUrl,
-        KeyCode::Up => InputCommand::ScrollUp,
-        KeyCode::Down => InputCommand::ScrollDown,
+        KeyCode::Up | KeyCode::Char('k') => InputCommand::ScrollUp,
+        KeyCode::Down | KeyCode::Char('j') => InputCommand::ScrollDown,
+        KeyCode::PageUp => InputCommand::PageUp,
+        KeyCode::PageDown => InputCommand::PageDown,
+        KeyCode::Home | KeyCode::Char('g') => InputCommand::JumpTop,
+        KeyCode::End | KeyCode::Char('G') => InputCommand::JumpBottom,
         _ => InputCommand::None,
     }
 }
@@ -114,6 +159,9 @@ pub fn parse_mouse_input(mouse: MouseEvent, terminal_area: Rect, model: &TuiMode
 
 pub fn handle_input(model: &mut TuiModel, command: InputCommand) {
     match command {
+        InputCommand::ToggleHelp => {
+            model.help_visible = !model.help_visible;
+        }
         InputCommand::ScrollUp => {
             model.selected = model.selected.saturating_sub(1);
         }
@@ -122,12 +170,45 @@ pub fn handle_input(model: &mut TuiModel, command: InputCommand) {
                 model.selected = (model.selected + 1).min(model.timeline.len() - 1);
             }
         }
+        InputCommand::PageUp => {
+            if !model.timeline.is_empty() {
+                model.selected = model.selected.saturating_sub(model.page_size());
+            }
+        }
+        InputCommand::PageDown => {
+            if !model.timeline.is_empty() {
+                model.selected = (model.selected + model.page_size()).min(model.timeline.len() - 1);
+            }
+        }
+        InputCommand::JumpTop => {
+            if !model.timeline.is_empty() {
+                model.selected = 0;
+            }
+        }
+        InputCommand::JumpBottom => {
+            if !model.timeline.is_empty() {
+                model.selected = model.timeline.len() - 1;
+            }
+        }
         InputCommand::SelectIndex(index) => {
             if !model.timeline.is_empty() {
                 model.selected = index.min(model.timeline.len() - 1);
             }
         }
         _ => {}
+    }
+
+    if matches!(
+        command,
+        InputCommand::ScrollUp
+            | InputCommand::ScrollDown
+            | InputCommand::PageUp
+            | InputCommand::PageDown
+            | InputCommand::JumpTop
+            | InputCommand::JumpBottom
+            | InputCommand::SelectIndex(_)
+    ) {
+        model.sync_selected_event_key();
     }
 }
 
@@ -171,8 +252,9 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     let vertical_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(6),
             Constraint::Min(5),
+            Constraint::Length(4),
             Constraint::Length(3),
         ])
         .split(frame.area());
@@ -180,6 +262,8 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(vertical_areas[1]);
+    let timeline_inner = shrink_by_border(main_areas[0]);
+    model.timeline_page_size = ((timeline_inner.height as usize) / 2).max(1);
 
     let last_success = model
         .last_success_at
@@ -203,8 +287,12 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(format!(
-            "status={} | last_success={} | next_poll={} | failures={}",
-            model.status_line, last_success, next_poll, model.failure_count
+            "status={} | failures={}",
+            model.status_line, model.failure_count
+        )),
+        Line::from(format!(
+            "last_success={} | next_poll={}",
+            last_success, next_poll
         )),
         Line::from(format!("latest_failure={latest_failure}")),
     ])
@@ -240,8 +328,10 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     if model.timeline.is_empty() {
         model.selected = 0;
         model.timeline_offset = 0;
+        model.selected_event_key = None;
     } else {
         model.selected = model.selected.min(model.timeline.len() - 1);
+        model.sync_selected_event_key();
         state.select(Some(model.selected));
     }
     frame.render_stateful_widget(list, main_areas[0], &mut state);
@@ -267,22 +357,32 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     );
     frame.render_widget(repo_list, main_areas[1]);
 
-    let footer_text = model
+    let selected_text = model
         .timeline
         .get(model.selected)
         .map(|ev| {
-            format!(
-                "q: quit | r: refresh | up/down: move | enter: open | mouse: click/wheel | {}",
-                ev.url
-            )
+            vec![
+                Line::from(format!(
+                    "[{}] [{}] @{} {}",
+                    ev.kind, ev.repo, ev.actor, ev.title
+                )),
+                Line::from(ev.url.clone()),
+            ]
         })
-        .unwrap_or_else(|| {
-            "q: quit | r: refresh | up/down: move | enter: open | mouse: click/wheel".to_string()
-        });
+        .unwrap_or_else(|| vec![Line::from("No selected event"), Line::from("-")]);
+    let selected = Paragraph::new(selected_text)
+        .block(Block::default().borders(Borders::ALL).title("Selected"));
+    frame.render_widget(selected, vertical_areas[2]);
 
-    let footer =
-        Paragraph::new(footer_text).block(Block::default().borders(Borders::ALL).title("Keys"));
-    frame.render_widget(footer, vertical_areas[2]);
+    let keys = Paragraph::new(
+        "q quit | r refresh | ? help | ↑/↓ or j/k move | PgUp/PgDn page | g/G top/bottom | Enter open",
+    )
+    .block(Block::default().borders(Borders::ALL).title("Keys"));
+    frame.render_widget(keys, vertical_areas[3]);
+
+    if model.help_visible {
+        render_help_overlay(frame);
+    }
 }
 
 fn summarize_failure(failure: &FailureRecord) -> String {
@@ -304,8 +404,9 @@ fn timeline_inner_area(area: Rect) -> Rect {
     let vertical_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(6),
             Constraint::Min(5),
+            Constraint::Length(4),
             Constraint::Length(3),
         ])
         .split(area);
@@ -333,4 +434,46 @@ fn contains_point(area: Rect, x: u16, y: u16) -> bool {
     let x_end = area.x.saturating_add(area.width);
     let y_end = area.y.saturating_add(area.height);
     x >= area.x && x < x_end && y >= area.y && y < y_end
+}
+
+fn render_help_overlay(frame: &mut Frame<'_>) {
+    let area = centered_rect(frame.area(), 80, 70);
+    frame.render_widget(Clear, area);
+
+    let help = Paragraph::new(vec![
+        Line::from(vec![Span::styled(
+            "Keyboard",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("q: quit, r: refresh, ?: toggle help"),
+        Line::from("up/down or j/k: move one item"),
+        Line::from("page up/page down: move one page"),
+        Line::from("g/home: top, G/end: bottom"),
+        Line::from("enter: open selected URL"),
+        Line::from("mouse: click to select, wheel to scroll"),
+    ])
+    .block(Block::default().borders(Borders::ALL).title("Help"))
+    .wrap(Wrap { trim: true });
+
+    frame.render_widget(help, area);
+}
+
+fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
+    let popup = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - height_percent) / 2),
+            Constraint::Percentage(height_percent),
+            Constraint::Percentage((100 - height_percent) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - width_percent) / 2),
+            Constraint::Percentage(width_percent),
+            Constraint::Percentage((100 - width_percent) / 2),
+        ])
+        .split(popup[1])[1]
 }

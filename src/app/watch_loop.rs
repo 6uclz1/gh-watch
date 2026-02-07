@@ -80,6 +80,7 @@ where
                 _ => LoopControl::Continue,
             }
         }
+        Some(Ok(Event::Resize(_, _))) => LoopControl::Redraw,
         Some(Ok(_)) => LoopControl::Continue,
         Some(Err(err)) => {
             tracing::warn!(error = %err, "input stream failed");
@@ -538,5 +539,55 @@ mod tests {
         assert!(model
             .status_line
             .contains("open failed: browser unavailable"));
+    }
+
+    #[test]
+    fn resize_event_requests_redraw() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 11, 0, 0, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+
+        let control = handle_stream_event(
+            Some(Ok(Event::Resize(100, 30))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+    }
+
+    #[test]
+    fn resize_event_does_not_mutate_navigation_state() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 12, 0, 0, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+        model.status_line = "ready".to_string();
+        model.selected = 3;
+        model.timeline_offset = 2;
+
+        let selected_before = model.selected;
+        let offset_before = model.timeline_offset;
+        let status_before = model.status_line.clone();
+
+        let control = handle_stream_event(
+            Some(Ok(Event::Resize(90, 20))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert_eq!(model.selected, selected_before);
+        assert_eq!(model.timeline_offset, offset_before);
+        assert_eq!(model.status_line, status_before);
     }
 }

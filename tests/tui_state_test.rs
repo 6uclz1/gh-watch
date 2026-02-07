@@ -70,6 +70,136 @@ fn enter_key_maps_to_open_selected_url() {
 }
 
 #[test]
+fn extended_navigation_keys_map_to_commands() {
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)),
+        InputCommand::ToggleHelp
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+        InputCommand::ScrollDown
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+        InputCommand::ScrollUp
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+        InputCommand::PageDown
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+        InputCommand::PageUp
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)),
+        InputCommand::JumpTop
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
+        InputCommand::JumpBottom
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+        InputCommand::JumpTop
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+        InputCommand::JumpBottom
+    );
+}
+
+#[test]
+fn help_toggle_switches_visibility() {
+    let mut model = TuiModel::new(10);
+    assert!(!model.help_visible);
+
+    handle_input(&mut model, InputCommand::ToggleHelp);
+    assert!(model.help_visible);
+
+    handle_input(&mut model, InputCommand::ToggleHelp);
+    assert!(!model.help_visible);
+}
+
+#[test]
+fn page_navigation_uses_page_size() {
+    let mut model = TuiModel::new(10);
+    for i in 0..8 {
+        model.push_timeline(vec![ev(
+            &format!("{i}"),
+            Utc.with_ymd_and_hms(2025, 1, i + 1, 0, 0, 0).unwrap(),
+        )]);
+    }
+    model.timeline_page_size = 3;
+    model.selected = 0;
+
+    handle_input(&mut model, InputCommand::PageDown);
+    assert_eq!(model.selected, 3);
+
+    handle_input(&mut model, InputCommand::PageUp);
+    assert_eq!(model.selected, 0);
+}
+
+#[test]
+fn jump_commands_move_to_edges() {
+    let mut model = TuiModel::new(10);
+    for i in 0..5 {
+        model.push_timeline(vec![ev(
+            &format!("{i}"),
+            Utc.with_ymd_and_hms(2025, 1, i + 1, 0, 0, 0).unwrap(),
+        )]);
+    }
+    model.selected = 2;
+
+    handle_input(&mut model, InputCommand::JumpBottom);
+    assert_eq!(model.selected, 4);
+
+    handle_input(&mut model, InputCommand::JumpTop);
+    assert_eq!(model.selected, 0);
+}
+
+#[test]
+fn timeline_keeps_selected_event_after_refresh_when_event_survives() {
+    let mut model = TuiModel::new(10);
+    model.push_timeline(vec![
+        ev("a", Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap()),
+        ev("b", Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap()),
+    ]);
+    model.selected = 1;
+    model.selected_event_key = Some(model.timeline[1].event_key());
+
+    model.push_timeline(vec![ev(
+        "c",
+        Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
+    )]);
+
+    assert_eq!(model.timeline[model.selected].event_id, "a");
+}
+
+#[test]
+fn timeline_selection_falls_back_when_selected_event_drops_out() {
+    let mut model = TuiModel::new(2);
+    model.push_timeline(vec![
+        ev("a", Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap()),
+        ev("b", Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap()),
+    ]);
+    model.selected = 1;
+    model.selected_event_key = Some(model.timeline[1].event_key());
+
+    model.push_timeline(vec![ev(
+        "c",
+        Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
+    )]);
+
+    assert_eq!(model.timeline.len(), 2);
+    assert_eq!(model.selected, 1);
+    assert!(model
+        .selected_event_key
+        .as_ref()
+        .is_some_and(|key| key == &model.timeline[1].event_key()));
+}
+
+#[test]
 fn mouse_click_in_timeline_selects_row_using_offset() {
     let mut model = TuiModel::new(10);
     model.push_timeline(vec![ev(
@@ -90,7 +220,7 @@ fn mouse_click_in_timeline_selects_row_using_offset() {
     let click = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 2,
-        row: 8,
+        row: 10,
         modifiers: KeyModifiers::NONE,
     };
 

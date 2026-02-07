@@ -48,3 +48,15 @@ fn input_scroll_changes_selection() {
     handle_input(&mut model, InputCommand::ScrollUp);
     assert_eq!(model.selected, 0);
 }
+
+#[test]
+fn watched_repositories_start_empty_and_can_be_set() {
+    let mut model = TuiModel::new(10);
+    assert!(model.watched_repositories.is_empty());
+
+    model.watched_repositories = vec!["acme/api".to_string(), "acme/web".to_string()];
+    assert_eq!(
+        model.watched_repositories,
+        vec!["acme/api".to_string(), "acme/web".to_string()]
+    );
+}

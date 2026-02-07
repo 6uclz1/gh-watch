@@ -30,6 +30,7 @@ pub enum InputCommand {
 #[derive(Debug, Clone)]
 pub struct TuiModel {
     pub timeline: Vec<WatchEvent>,
+    pub watched_repositories: Vec<String>,
     pub selected: usize,
     pub status_line: String,
     pub failure_count: u64,
@@ -43,6 +44,7 @@ impl TuiModel {
     pub fn new(limit: usize) -> Self {
         Self {
             timeline: Vec::new(),
+            watched_repositories: Vec::new(),
             selected: 0,
             status_line: "starting".to_string(),
             failure_count: 0,
@@ -118,7 +120,7 @@ impl Drop for TerminalUi {
 }
 
 fn render(frame: &mut Frame<'_>, model: &TuiModel) {
-    let areas = Layout::default()
+    let vertical_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),
@@ -126,6 +128,10 @@ fn render(frame: &mut Frame<'_>, model: &TuiModel) {
             Constraint::Length(3),
         ])
         .split(frame.area());
+    let main_areas = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(vertical_areas[1]);
 
     let last_success = model
         .last_success_at
@@ -155,7 +161,7 @@ fn render(frame: &mut Frame<'_>, model: &TuiModel) {
         Line::from(format!("latest_failure={latest_failure}")),
     ])
     .block(Block::default().borders(Borders::ALL).title("Status"));
-    frame.render_widget(header, areas[0]);
+    frame.render_widget(header, vertical_areas[0]);
 
     let items = if model.timeline.is_empty() {
         vec![ListItem::new("No events yet")]
@@ -186,7 +192,23 @@ fn render(frame: &mut Frame<'_>, model: &TuiModel) {
     if !model.timeline.is_empty() {
         state.select(Some(model.selected.min(model.timeline.len() - 1)));
     }
-    frame.render_stateful_widget(list, areas[1], &mut state);
+    frame.render_stateful_widget(list, main_areas[0], &mut state);
+
+    let repo_items = if model.watched_repositories.is_empty() {
+        vec![ListItem::new("No enabled repositories")]
+    } else {
+        model
+            .watched_repositories
+            .iter()
+            .map(|repo| ListItem::new(repo.clone()))
+            .collect()
+    };
+    let repo_list = List::new(repo_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Watching Repositories"),
+    );
+    frame.render_widget(repo_list, main_areas[1]);
 
     let footer_text = model
         .timeline
@@ -196,7 +218,7 @@ fn render(frame: &mut Frame<'_>, model: &TuiModel) {
 
     let footer =
         Paragraph::new(footer_text).block(Block::default().borders(Borders::ALL).title("Keys"));
-    frame.render_widget(footer, areas[2]);
+    frame.render_widget(footer, vertical_areas[2]);
 }
 
 fn summarize_failure(failure: &FailureRecord) -> String {

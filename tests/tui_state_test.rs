@@ -55,6 +55,9 @@ fn input_scroll_changes_selection() {
 fn watched_repositories_start_empty_and_can_be_set() {
     let mut model = TuiModel::new(10);
     assert!(model.watched_repositories.is_empty());
+    assert!(!model.is_polling);
+    assert!(model.poll_started_at.is_none());
+    assert!(!model.queued_refresh);
 
     model.watched_repositories = vec!["acme/api".to_string(), "acme/web".to_string()];
     assert_eq!(
@@ -226,6 +229,20 @@ fn mouse_click_in_timeline_selects_row_using_offset() {
 
     let cmd = parse_mouse_input(click, area, &model);
     assert_eq!(cmd, InputCommand::SelectIndex(2));
+}
+
+#[test]
+fn polling_state_fields_are_mutable_for_loading_transitions() {
+    let mut model = TuiModel::new(10);
+    let started_at = Utc.with_ymd_and_hms(2025, 1, 5, 12, 30, 0).unwrap();
+
+    model.is_polling = true;
+    model.poll_started_at = Some(started_at);
+    model.queued_refresh = true;
+
+    assert!(model.is_polling);
+    assert_eq!(model.poll_started_at, Some(started_at));
+    assert!(model.queued_refresh);
 }
 
 #[test]

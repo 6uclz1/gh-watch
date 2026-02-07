@@ -1,4 +1,4 @@
-use std::{process::Command, time::Duration};
+use std::{future::Future, pin::Pin, process::Command, time::Duration};
 
 use anyhow::{anyhow, Result};
 use crossterm::event::Event;
@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 use tokio::time::MissedTickBehavior;
 
 use crate::{
-    app::poll_once::poll_once,
+    app::poll_once::{poll_once, PollOutcome},
     config::Config,
     domain::failure::{FailureRecord, FAILURE_KIND_INPUT_STREAM, FAILURE_KIND_POLL_LOOP},
     ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
@@ -20,6 +20,61 @@ enum LoopControl {
     RequestPoll,
     Redraw,
     Quit,
+}
+
+type PollFuture<'a> = Pin<Box<dyn Future<Output = Result<PollOutcome>> + 'a>>;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PollExecutionState {
+    poll_requested: bool,
+    in_flight: bool,
+    queued_refresh: bool,
+}
+
+impl PollExecutionState {
+    fn request_poll(&mut self) -> bool {
+        if self.in_flight {
+            self.queued_refresh = true;
+            return false;
+        }
+
+        if self.poll_requested {
+            return false;
+        }
+
+        self.poll_requested = true;
+        true
+    }
+
+    fn start_poll(&mut self) -> bool {
+        if self.in_flight || !self.poll_requested {
+            return false;
+        }
+
+        self.poll_requested = false;
+        self.in_flight = true;
+        true
+    }
+
+    fn finish_poll_and_take_next_request(&mut self) -> bool {
+        self.in_flight = false;
+
+        if self.queued_refresh {
+            self.queued_refresh = false;
+            self.poll_requested = true;
+            return true;
+        }
+
+        false
+    }
+
+    fn in_flight(&self) -> bool {
+        self.in_flight
+    }
+
+    fn queued_refresh(&self) -> bool {
+        self.queued_refresh
+    }
 }
 
 fn handle_stream_event<S, K>(
@@ -125,6 +180,50 @@ fn enabled_repository_names(config: &Config) -> Vec<String> {
         .collect()
 }
 
+fn apply_poll_result<S, K>(result: Result<PollOutcome>, model: &mut TuiModel, state: &S, clock: &K)
+where
+    S: StateStorePort,
+    K: ClockPort,
+{
+    match result {
+        Ok(outcome) => {
+            if !outcome.timeline_events.is_empty() {
+                model.push_timeline(outcome.timeline_events);
+            }
+            if outcome.repo_errors.is_empty() {
+                model.status_line = format!("ok (new={})", outcome.notified_count);
+                model.last_success_at = Some(clock.now());
+            } else {
+                model.status_line = format!(
+                    "partial errors={} (new={})",
+                    outcome.repo_errors.len(),
+                    outcome.notified_count
+                );
+                model.failure_count += outcome.repo_errors.len() as u64;
+            }
+            if let Some(last_failure) = outcome.failures.last().cloned() {
+                model.latest_failure = Some(last_failure);
+            }
+        }
+        Err(err) => {
+            model.failure_count += 1;
+            model.status_line = format!("poll failed: {err}");
+            let failure = FailureRecord::new(
+                FAILURE_KIND_POLL_LOOP,
+                "<watch_loop>",
+                clock.now(),
+                err.to_string(),
+            );
+            if let Err(record_err) = state.record_failure(&failure) {
+                model.status_line =
+                    format!("poll failed: {err} | failed to persist error: {record_err}");
+            } else {
+                model.latest_failure = Some(failure);
+            }
+        }
+    }
+}
+
 pub async fn run_watch<C, S, N, K>(
     config: &Config,
     gh: &C,
@@ -150,60 +249,51 @@ where
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_seconds));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut reader = crossterm::event::EventStream::new();
-    let mut force_poll = true;
+    let mut poll_state = PollExecutionState::default();
+    let mut in_flight_poll: Option<PollFuture<'_>> = None;
+    poll_state.request_poll();
 
     loop {
-        if force_poll {
+        if poll_state.start_poll() {
+            model.is_polling = poll_state.in_flight();
+            model.poll_started_at = Some(clock.now());
+            model.queued_refresh = poll_state.queued_refresh();
             model.status_line = "polling".to_string();
             ui.draw(&mut model)?;
-
-            match poll_once(config, gh, state, notifier, clock).await {
-                Ok(outcome) => {
-                    if !outcome.timeline_events.is_empty() {
-                        model.push_timeline(outcome.timeline_events);
-                    }
-                    if outcome.repo_errors.is_empty() {
-                        model.status_line = format!("ok (new={})", outcome.notified_count);
-                        model.last_success_at = Some(clock.now());
-                    } else {
-                        model.status_line = format!(
-                            "partial errors={} (new={})",
-                            outcome.repo_errors.len(),
-                            outcome.notified_count
-                        );
-                        model.failure_count += outcome.repo_errors.len() as u64;
-                    }
-                    if let Some(last_failure) = outcome.failures.last().cloned() {
-                        model.latest_failure = Some(last_failure);
-                    }
-                }
-                Err(err) => {
-                    model.failure_count += 1;
-                    model.status_line = format!("poll failed: {err}");
-                    let failure = FailureRecord::new(
-                        FAILURE_KIND_POLL_LOOP,
-                        "<watch_loop>",
-                        clock.now(),
-                        err.to_string(),
-                    );
-                    if let Err(record_err) = state.record_failure(&failure) {
-                        model.status_line =
-                            format!("poll failed: {err} | failed to persist error: {record_err}");
-                    } else {
-                        model.latest_failure = Some(failure);
-                    }
-                }
-            }
-
-            model.next_poll_at =
-                Some(clock.now() + chrono::Duration::seconds(config.interval_seconds as i64));
-            ui.draw(&mut model)?;
-            force_poll = false;
+            in_flight_poll = Some(Box::pin(poll_once(config, gh, state, notifier, clock)));
         }
 
         tokio::select! {
             _ = interval.tick() => {
-                force_poll = true;
+                poll_state.request_poll();
+                model.queued_refresh = poll_state.queued_refresh();
+                if model.is_polling {
+                    ui.draw(&mut model)?;
+                }
+            }
+            poll_result = async {
+                match in_flight_poll.as_mut() {
+                    Some(fut) => Some(fut.await),
+                    None => None,
+                }
+            }, if in_flight_poll.is_some() => {
+                let result = poll_result.expect("poll future must exist when branch is active");
+                in_flight_poll = None;
+
+                apply_poll_result(result, &mut model, state, clock);
+                let queued_for_immediate_next = poll_state.finish_poll_and_take_next_request();
+
+                model.is_polling = poll_state.in_flight();
+                model.poll_started_at = None;
+                model.queued_refresh = poll_state.queued_refresh();
+                model.next_poll_at =
+                    Some(clock.now() + chrono::Duration::seconds(config.interval_seconds as i64));
+
+                if queued_for_immediate_next {
+                    model.status_line = format!("{} | queued refresh", model.status_line);
+                }
+
+                ui.draw(&mut model)?;
             }
             maybe_event = reader.next() => {
                 let terminal_area = ui.terminal_area().unwrap_or_default();
@@ -217,7 +307,11 @@ where
                 ) {
                     LoopControl::Quit => break,
                     LoopControl::RequestPoll => {
-                        force_poll = true;
+                        poll_state.request_poll();
+                        model.queued_refresh = poll_state.queued_refresh();
+                        if model.is_polling {
+                            ui.draw(&mut model)?;
+                        }
                     }
                     LoopControl::Redraw => {
                         ui.draw(&mut model)?;
@@ -288,7 +382,7 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
 
-    use super::{enabled_repository_names, handle_stream_event, LoopControl};
+    use super::{enabled_repository_names, handle_stream_event, LoopControl, PollExecutionState};
     use crate::{
         config::{Config, NotificationConfig, RepositoryConfig},
         domain::{
@@ -675,5 +769,28 @@ mod tests {
 
         assert_eq!(control, LoopControl::Redraw);
         assert_eq!(model.selected, 2);
+    }
+
+    #[test]
+    fn refresh_requested_while_polling_is_queued_without_parallel_start() {
+        let mut state = PollExecutionState::default();
+        assert!(state.request_poll());
+        assert!(state.start_poll());
+        assert!(!state.request_poll());
+        assert!(state.queued_refresh());
+        assert!(state.in_flight());
+    }
+
+    #[test]
+    fn queued_refresh_is_consumed_exactly_once_after_poll_completion() {
+        let mut state = PollExecutionState::default();
+        assert!(state.request_poll());
+        assert!(state.start_poll());
+        assert!(!state.request_poll());
+
+        assert!(state.finish_poll_and_take_next_request());
+        assert!(!state.finish_poll_and_take_next_request());
+        assert!(!state.queued_refresh());
+        assert!(!state.in_flight());
     }
 }

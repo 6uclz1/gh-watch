@@ -25,6 +25,12 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint with clippy (warnings as errors)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 

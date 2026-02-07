@@ -53,6 +53,16 @@ struct FakeState {
     notified: Arc<Mutex<HashMap<String, WatchEvent>>>,
     timeline: Arc<Mutex<Vec<WatchEvent>>>,
     failures: Arc<Mutex<Vec<FailureRecord>>>,
+    fail_set_cursor_for: Arc<Mutex<HashSet<String>>>,
+}
+
+impl FakeState {
+    fn fail_set_cursor_for(&self, repo: &str) {
+        self.fail_set_cursor_for
+            .lock()
+            .unwrap()
+            .insert(repo.to_string());
+    }
 }
 
 impl StateStorePort for FakeState {
@@ -61,6 +71,9 @@ impl StateStorePort for FakeState {
     }
 
     fn set_cursor(&self, repo: &str, at: chrono::DateTime<Utc>) -> Result<()> {
+        if self.fail_set_cursor_for.lock().unwrap().contains(repo) {
+            return Err(anyhow!("cursor write failed for {repo}"));
+        }
         self.cursors.lock().unwrap().insert(repo.to_string(), at);
         Ok(())
     }
@@ -357,4 +370,32 @@ async fn notification_failure_retries_failed_event_without_duplicating_successes
         notifier.sent.lock().unwrap().as_slice(),
         &[first.event_key(), second.event_key()]
     );
+}
+
+#[tokio::test]
+async fn cursor_update_failure_has_repo_and_root_cause() {
+    let gh = FakeGh::default();
+    let state = FakeState::default();
+    state.cursors.lock().unwrap().insert(
+        "acme/api".to_string(),
+        Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+    );
+    state.cursors.lock().unwrap().insert(
+        "acme/web".to_string(),
+        Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+    );
+    state.fail_set_cursor_for("acme/api");
+
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
+    };
+
+    let err = poll_once(&cfg(), &gh, &state, &notifier, &clock)
+        .await
+        .unwrap_err();
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("failed to update cursor for acme/api"));
+    assert!(msg.contains("cursor write failed for acme/api"));
 }

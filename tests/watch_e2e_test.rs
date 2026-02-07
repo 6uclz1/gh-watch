@@ -30,19 +30,23 @@ if [[ "$1" == "auth" && "$2" == "status" ]]; then
   exit 0
 fi
 if [[ "$1" == "api" ]]; then
-  endpoint="$2"
+  endpoint="${@: -1}"
   if [[ "$endpoint" == "repos/acme/api/issues/comments"* ]]; then
-    echo '[]'
+    echo '[[]]'
     exit 0
   fi
   if [[ "$endpoint" == "repos/acme/api/pulls/comments"* ]]; then
-    echo '[]'
+    echo '[[]]'
     exit 0
   fi
   if [[ "$endpoint" == "repos/acme/api/pulls"* ]]; then
-    cat <<JSON
+    if [[ "$endpoint" == *"page=1" ]]; then
+      cat <<JSON
 [{"id":101,"number":1,"title":"Add API","html_url":"https://example.com/pr/1","created_at":"2025-01-02T00:00:00Z","user":{"login":"alice"}}]
 JSON
+      exit 0
+    fi
+    echo '[]'
     exit 0
   fi
   if [[ "$endpoint" == "repos/acme/api/issues"* ]]; then

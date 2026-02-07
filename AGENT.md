@@ -81,10 +81,11 @@
 ## `gh` 連携仕様（実装済み）
 - 認証確認: `gh auth status`
 - 取得:
-  - `repos/{repo}/pulls?state=all&sort=created&direction=desc&per_page=100`
-  - `repos/{repo}/issues?state=all&sort=created&direction=desc&per_page=100`
-  - `repos/{repo}/issues/comments?since=<RFC3339>&per_page=100`
-  - `repos/{repo}/pulls/comments?since=<RFC3339>&per_page=100`
+  - PR/Issueは `page` を進めながら手動ページング（`per_page=100`）
+  - PR/Issueは created降順の最古要素が `since` 以下になったら打ち切り
+  - `repos/{repo}/issues/comments?since=<RFC3339>&per_page=100` を `gh api --paginate --slurp` で取得
+  - `repos/{repo}/pulls/comments?since=<RFC3339>&per_page=100` を `gh api --paginate --slurp` で取得
+  - ページング無限化対策として endpointごとに最大ページ上限あり（1000）
 - テスト向けに `GH_WATCH_GH_BIN` で `gh` バイナリパスを差し替え可能
 
 ## SQLiteスキーマ
@@ -126,7 +127,6 @@
   2. `cargo run -- watch --config ./config.example.toml`
 
 ## 既知の制約 / 次の改善候補
-- GitHub APIのページング追従は未実装（現在 `per_page=100` 固定）
 - repo間ポーリングは逐次実行（並列化なし）
 - 監視失敗の永続ログ基盤は未実装（TUIステータス中心）
 - 通知失敗イベントは記録しないため、次回pollで再通知試行される

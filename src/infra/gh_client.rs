@@ -11,6 +11,9 @@ use crate::{
     ports::GhClientPort,
 };
 
+const PAGE_SIZE: usize = 100;
+const MAX_PAGES_PER_ENDPOINT: usize = 1000;
+
 #[derive(Debug, Clone)]
 pub struct GhCliClient {
     gh_bin: PathBuf,
@@ -68,6 +71,173 @@ pub fn normalize_events_from_payloads(
     let review_comments: Vec<GhComment> =
         serde_json::from_str(review_comments_json).context("invalid review comments payload")?;
 
+    let mut events =
+        normalize_events_from_items(repo, since, pulls, issues, issue_comments, review_comments);
+
+    events.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(events)
+}
+
+#[async_trait]
+impl GhClientPort for GhCliClient {
+    async fn check_auth(&self) -> Result<()> {
+        self.run_gh(&["auth", "status"])
+            .await
+            .context("gh auth status failed")?;
+        Ok(())
+    }
+
+    async fn fetch_repo_events(&self, repo: &str, since: DateTime<Utc>) -> Result<Vec<WatchEvent>> {
+        let pulls = self
+            .fetch_created_desc_until_since::<GhPull, _, _>(
+                repo,
+                "pulls",
+                since,
+                |page| {
+                    format!(
+                        "repos/{repo}/pulls?state=all&sort=created&direction=desc&per_page={PAGE_SIZE}&page={page}"
+                    )
+                },
+                |pr| pr.created_at,
+            )
+            .await
+            .with_context(|| format!("failed to fetch pulls for {repo}"))?;
+
+        let issues = self
+            .fetch_created_desc_until_since::<GhIssue, _, _>(
+                repo,
+                "issues",
+                since,
+                |page| {
+                    format!(
+                        "repos/{repo}/issues?state=all&sort=created&direction=desc&per_page={PAGE_SIZE}&page={page}"
+                    )
+                },
+                |issue| issue.created_at,
+            )
+            .await
+            .with_context(|| format!("failed to fetch issues for {repo}"))?;
+
+        let since_rfc3339 = since.to_rfc3339();
+        let issue_comments = self
+            .fetch_paginated_comments(
+                repo,
+                "issue comments",
+                &format!("repos/{repo}/issues/comments?since={since_rfc3339}&per_page={PAGE_SIZE}"),
+            )
+            .await
+            .with_context(|| format!("failed to fetch issue comments for {repo}"))?;
+
+        let review_comments = self
+            .fetch_paginated_comments(
+                repo,
+                "review comments",
+                &format!("repos/{repo}/pulls/comments?since={since_rfc3339}&per_page={PAGE_SIZE}"),
+            )
+            .await
+            .with_context(|| format!("failed to fetch review comments for {repo}"))?;
+
+        let mut events = normalize_events_from_items(
+            repo,
+            since,
+            pulls,
+            issues,
+            issue_comments,
+            review_comments,
+        );
+        events.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(events)
+    }
+}
+
+impl GhCliClient {
+    async fn fetch_created_desc_until_since<T, E, C>(
+        &self,
+        repo: &str,
+        item_label: &str,
+        since: DateTime<Utc>,
+        endpoint_for_page: E,
+        created_at: C,
+    ) -> Result<Vec<T>>
+    where
+        T: for<'de> Deserialize<'de>,
+        E: Fn(usize) -> String,
+        C: Fn(&T) -> DateTime<Utc>,
+    {
+        let mut all_items = Vec::new();
+        let mut did_break = false;
+
+        for page in 1..=MAX_PAGES_PER_ENDPOINT {
+            let endpoint = endpoint_for_page(page);
+            let payload = self.run_gh(&["api", &endpoint]).await.with_context(|| {
+                format!(
+                    "failed to fetch {item_label} for {repo} (endpoint={endpoint}, page={page})"
+                )
+            })?;
+
+            let mut page_items: Vec<T> = serde_json::from_str(&payload).with_context(|| {
+                format!(
+                    "invalid {item_label} payload for {repo} (endpoint={endpoint}, page={page})"
+                )
+            })?;
+
+            if page_items.is_empty() {
+                did_break = true;
+                break;
+            }
+
+            let reached_since = page_items
+                .last()
+                .map(|item| created_at(item) <= since)
+                .unwrap_or(false);
+            all_items.append(&mut page_items);
+
+            if reached_since {
+                did_break = true;
+                break;
+            }
+        }
+
+        if did_break {
+            return Ok(all_items);
+        }
+
+        Err(anyhow!(
+            "max pages reached while fetching {item_label} for {repo} (limit={MAX_PAGES_PER_ENDPOINT})"
+        ))
+    }
+
+    async fn fetch_paginated_comments(
+        &self,
+        repo: &str,
+        item_label: &str,
+        endpoint: &str,
+    ) -> Result<Vec<GhComment>> {
+        let payload = self
+            .run_gh(&["api", "--paginate", "--slurp", endpoint])
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to fetch {item_label} for {repo} (endpoint={endpoint}, paginate=true)"
+                )
+            })?;
+
+        let pages: Vec<Vec<GhComment>> = serde_json::from_str(&payload).with_context(|| {
+            format!("invalid {item_label} payload for {repo} (endpoint={endpoint}, paginate=true)")
+        })?;
+
+        Ok(pages.into_iter().flatten().collect())
+    }
+}
+
+fn normalize_events_from_items(
+    repo: &str,
+    since: DateTime<Utc>,
+    pulls: Vec<GhPull>,
+    issues: Vec<GhIssue>,
+    issue_comments: Vec<GhComment>,
+    review_comments: Vec<GhComment>,
+) -> Vec<WatchEvent> {
     let mut events = Vec::new();
 
     events.extend(
@@ -147,62 +317,7 @@ pub fn normalize_events_from_payloads(
             }),
     );
 
-    events.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-    Ok(events)
-}
-
-#[async_trait]
-impl GhClientPort for GhCliClient {
-    async fn check_auth(&self) -> Result<()> {
-        self.run_gh(&["auth", "status"])
-            .await
-            .context("gh auth status failed")?;
-        Ok(())
-    }
-
-    async fn fetch_repo_events(&self, repo: &str, since: DateTime<Utc>) -> Result<Vec<WatchEvent>> {
-        let pulls = self
-            .run_gh(&[
-                "api",
-                &format!("repos/{repo}/pulls?state=all&sort=created&direction=desc&per_page=100"),
-            ])
-            .await
-            .with_context(|| format!("failed to fetch pulls for {repo}"))?;
-
-        let issues = self
-            .run_gh(&[
-                "api",
-                &format!("repos/{repo}/issues?state=all&sort=created&direction=desc&per_page=100"),
-            ])
-            .await
-            .with_context(|| format!("failed to fetch issues for {repo}"))?;
-
-        let since_rfc3339 = since.to_rfc3339();
-        let issue_comments = self
-            .run_gh(&[
-                "api",
-                &format!("repos/{repo}/issues/comments?since={since_rfc3339}&per_page=100"),
-            ])
-            .await
-            .with_context(|| format!("failed to fetch issue comments for {repo}"))?;
-
-        let review_comments = self
-            .run_gh(&[
-                "api",
-                &format!("repos/{repo}/pulls/comments?since={since_rfc3339}&per_page=100"),
-            ])
-            .await
-            .with_context(|| format!("failed to fetch review comments for {repo}"))?;
-
-        normalize_events_from_payloads(
-            repo,
-            since,
-            &pulls,
-            &issues,
-            &issue_comments,
-            &review_comments,
-        )
-    }
+    events
 }
 
 fn title_from_comment(body: Option<&str>, fallback: &str) -> String {

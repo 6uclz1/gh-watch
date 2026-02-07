@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -99,6 +99,13 @@ impl StateStorePort for FakeState {
 #[derive(Clone, Default)]
 struct FakeNotifier {
     sent: Arc<Mutex<Vec<String>>>,
+    fail_once: Arc<Mutex<HashSet<String>>>,
+}
+
+impl FakeNotifier {
+    fn fail_once_for(&self, event_key: &str) {
+        self.fail_once.lock().unwrap().insert(event_key.to_string());
+    }
 }
 
 impl NotifierPort for FakeNotifier {
@@ -107,7 +114,11 @@ impl NotifierPort for FakeNotifier {
     }
 
     fn notify(&self, event: &WatchEvent, _include_url: bool) -> Result<()> {
-        self.sent.lock().unwrap().push(event.event_key());
+        let event_key = event.event_key();
+        if self.fail_once.lock().unwrap().remove(&event_key) {
+            return Err(anyhow!("notify failed once"));
+        }
+        self.sent.lock().unwrap().push(event_key);
         Ok(())
     }
 }
@@ -147,6 +158,10 @@ fn cfg() -> Config {
 }
 
 fn sample_event(repo: &str, id: &str) -> WatchEvent {
+    sample_event_at(repo, id, Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap())
+}
+
+fn sample_event_at(repo: &str, id: &str, created_at: chrono::DateTime<Utc>) -> WatchEvent {
     WatchEvent {
         event_id: id.to_string(),
         repo: repo.to_string(),
@@ -154,7 +169,7 @@ fn sample_event(repo: &str, id: &str) -> WatchEvent {
         actor: "alice".to_string(),
         title: "Add API".to_string(),
         url: "https://example.com/pr/1".to_string(),
-        created_at: Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
+        created_at,
         source_item_id: id.to_string(),
     }
 }
@@ -250,4 +265,72 @@ async fn repo_failure_does_not_block_others() {
 
     assert_eq!(out.notified_count, 1);
     assert_eq!(out.repo_errors.len(), 1);
+}
+
+#[tokio::test]
+async fn notification_failure_retries_failed_event_without_duplicating_successes() {
+    let event_time = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
+    let first = sample_event_at("acme/api", "123", event_time);
+    let second = sample_event_at("acme/api", "456", event_time);
+
+    let gh = FakeGh::default();
+    gh.repos
+        .lock()
+        .unwrap()
+        .insert("acme/api".to_string(), vec![first.clone(), second.clone()]);
+
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+
+    let notifier = FakeNotifier::default();
+    notifier.fail_once_for(&second.event_key());
+
+    let c1 = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
+    };
+    let c2 = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 4, 0, 0, 0).unwrap(),
+    };
+    let c3 = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 5, 0, 0, 0).unwrap(),
+    };
+
+    let out1 = poll_once(&cfg(), &gh, &state, &notifier, &c1)
+        .await
+        .unwrap();
+    assert_eq!(out1.notified_count, 1);
+    assert_eq!(out1.repo_errors.len(), 1);
+    assert_eq!(
+        state.get_cursor("acme/api").unwrap().unwrap(),
+        event_time - chrono::Duration::nanoseconds(1)
+    );
+
+    let out2 = poll_once(&cfg(), &gh, &state, &notifier, &c2)
+        .await
+        .unwrap();
+    assert_eq!(out2.notified_count, 1);
+    assert!(out2.repo_errors.is_empty());
+    assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c2.now);
+
+    let out3 = poll_once(&cfg(), &gh, &state, &notifier, &c3)
+        .await
+        .unwrap();
+    assert_eq!(out3.notified_count, 0);
+    assert!(out3.repo_errors.is_empty());
+
+    assert_eq!(
+        notifier.sent.lock().unwrap().as_slice(),
+        &[first.event_key(), second.event_key()]
+    );
 }

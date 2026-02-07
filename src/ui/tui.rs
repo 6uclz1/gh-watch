@@ -15,11 +15,16 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState, Wrap,
+    },
     Frame, Terminal,
 };
 
-use crate::domain::{events::WatchEvent, failure::FailureRecord};
+use crate::domain::{
+    events::{EventKind, WatchEvent},
+    failure::FailureRecord,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputCommand {
@@ -51,6 +56,9 @@ pub struct TuiModel {
     pub latest_failure: Option<FailureRecord>,
     pub last_success_at: Option<DateTime<Utc>>,
     pub next_poll_at: Option<DateTime<Utc>>,
+    pub is_polling: bool,
+    pub poll_started_at: Option<DateTime<Utc>>,
+    pub queued_refresh: bool,
     limit: usize,
 }
 
@@ -69,6 +77,9 @@ impl TuiModel {
             latest_failure: None,
             last_success_at: None,
             next_poll_at: None,
+            is_polling: false,
+            poll_started_at: None,
+            queued_refresh: false,
             limit,
         }
     }
@@ -146,7 +157,11 @@ pub fn parse_mouse_input(mouse: MouseEvent, terminal_area: Rect, model: &TuiMode
             }
 
             let row = mouse.row.saturating_sub(timeline_inner.y) as usize;
-            let index = model.timeline_offset + (row / 2);
+            if row == 0 {
+                return InputCommand::None;
+            }
+
+            let index = model.timeline_offset + row.saturating_sub(1);
             if index < model.timeline.len() {
                 InputCommand::SelectIndex(index)
             } else {
@@ -252,9 +267,9 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     let vertical_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),
+            Constraint::Length(7),
             Constraint::Min(5),
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Length(3),
         ])
         .split(frame.area());
@@ -263,16 +278,10 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(vertical_areas[1]);
     let timeline_inner = shrink_by_border(main_areas[0]);
-    model.timeline_page_size = ((timeline_inner.height as usize) / 2).max(1);
+    model.timeline_page_size = (timeline_inner.height as usize).saturating_sub(1).max(1);
 
-    let last_success = model
-        .last_success_at
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_else(|| "-".to_string());
-    let next_poll = model
-        .next_poll_at
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_else(|| "-".to_string());
+    let last_success = format_status_time(model.last_success_at);
+    let next_poll = format_status_time(model.next_poll_at);
     let latest_failure = model
         .latest_failure
         .as_ref()
@@ -290,6 +299,7 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
             "status={} | failures={}",
             model.status_line, model.failure_count
         )),
+        Line::from(build_loading_status_line(model, Utc::now())),
         Line::from(format!(
             "last_success={} | next_poll={}",
             last_success, next_poll
@@ -299,32 +309,37 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     .block(Block::default().borders(Borders::ALL).title("Status"));
     frame.render_widget(header, vertical_areas[0]);
 
-    let items = if model.timeline.is_empty() {
-        vec![ListItem::new("No events yet")]
+    let rows = if model.timeline.is_empty() {
+        vec![Row::new(vec![
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("No events yet"),
+        ])]
     } else {
-        model
-            .timeline
-            .iter()
-            .map(|event| {
-                ListItem::new(vec![
-                    Line::from(format!(
-                        "[{}] [{}] [{}] @{}",
-                        event.created_at.to_rfc3339(),
-                        event.kind,
-                        event.repo,
-                        event.actor
-                    )),
-                    Line::from(event.title.clone()),
-                ])
-            })
-            .collect()
+        model.timeline.iter().map(timeline_row).collect()
     };
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Timeline"))
-        .highlight_style(Style::default().bg(Color::DarkGray));
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(14),
+            Constraint::Length(8),
+            Constraint::Length(22),
+            Constraint::Length(16),
+            Constraint::Min(12),
+        ],
+    )
+    .header(
+        Row::new(vec!["Time(UTC)", "Type", "Repo", "Actor", "Title"])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(Block::default().borders(Borders::ALL).title("Timeline"))
+    .row_highlight_style(Style::default().bg(Color::DarkGray))
+    .highlight_symbol(">> ");
 
-    let mut state = ListState::default().with_offset(model.timeline_offset);
+    let mut state = TableState::default().with_offset(model.timeline_offset);
     if model.timeline.is_empty() {
         model.selected = 0;
         model.timeline_offset = 0;
@@ -334,7 +349,7 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
         model.sync_selected_event_key();
         state.select(Some(model.selected));
     }
-    frame.render_stateful_widget(list, main_areas[0], &mut state);
+    frame.render_stateful_widget(table, main_areas[0], &mut state);
     model.timeline_offset = if model.timeline.is_empty() {
         0
     } else {
@@ -362,27 +377,124 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
         .get(model.selected)
         .map(|ev| {
             vec![
+                Line::from(vec![
+                    Span::styled(event_kind_label(&ev.kind), event_kind_style(&ev.kind)),
+                    Span::raw(format!(" {}", truncate_tail(&ev.title, 72))),
+                ]),
                 Line::from(format!(
-                    "[{}] [{}] @{} {}",
-                    ev.kind, ev.repo, ev.actor, ev.title
+                    "repo={} | actor=@{} | at={}",
+                    ev.repo,
+                    ev.actor,
+                    format_status_time(Some(ev.created_at))
                 )),
                 Line::from(ev.url.clone()),
             ]
         })
-        .unwrap_or_else(|| vec![Line::from("No selected event"), Line::from("-")]);
+        .unwrap_or_else(|| {
+            vec![
+                Line::from("No selected event"),
+                Line::from("-"),
+                Line::from("-"),
+            ]
+        });
     let selected = Paragraph::new(selected_text)
         .block(Block::default().borders(Borders::ALL).title("Selected"));
     frame.render_widget(selected, vertical_areas[2]);
 
-    let keys = Paragraph::new(
-        "q quit | r refresh | ? help | ↑/↓ or j/k move | PgUp/PgDn page | g/G top/bottom | Enter open",
-    )
+    let loading_hint = if model.is_polling {
+        "loading: move/help/open available, r queues next refresh"
+    } else {
+        "loading: idle"
+    };
+    let keys = Paragraph::new(vec![
+        Line::from(
+            "q quit | r refresh | ? help | ↑/↓ or j/k move | PgUp/PgDn page | g/G top/bottom | Enter open",
+        ),
+        Line::from(loading_hint),
+    ])
     .block(Block::default().borders(Borders::ALL).title("Keys"));
     frame.render_widget(keys, vertical_areas[3]);
 
     if model.help_visible {
         render_help_overlay(frame);
     }
+}
+
+fn format_status_time(dt: Option<DateTime<Utc>>) -> String {
+    dt.map(|d| d.format("%Y-%m-%d %H:%M:%SZ").to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_timeline_time(dt: DateTime<Utc>) -> String {
+    dt.format("%m-%d %H:%M:%S").to_string()
+}
+
+fn event_kind_label(kind: &EventKind) -> &'static str {
+    match kind {
+        EventKind::PrCreated => "PR",
+        EventKind::IssueCreated => "ISSUE",
+        EventKind::IssueCommentCreated => "I-CMT",
+        EventKind::PrReviewCommentCreated => "PR-CMT",
+    }
+}
+
+fn event_kind_style(kind: &EventKind) -> Style {
+    match kind {
+        EventKind::PrCreated => Style::default().fg(Color::Cyan),
+        EventKind::IssueCreated => Style::default().fg(Color::Yellow),
+        EventKind::IssueCommentCreated => Style::default().fg(Color::Green),
+        EventKind::PrReviewCommentCreated => Style::default().fg(Color::Magenta),
+    }
+}
+
+fn timeline_row(event: &WatchEvent) -> Row<'static> {
+    Row::new(vec![
+        Cell::from(format_timeline_time(event.created_at)),
+        Cell::from(Span::styled(
+            event_kind_label(&event.kind),
+            event_kind_style(&event.kind),
+        )),
+        Cell::from(truncate_tail(&event.repo, 22)),
+        Cell::from(truncate_tail(&format!("@{}", event.actor), 16)),
+        Cell::from(truncate_tail(&event.title, 96)),
+    ])
+}
+
+fn truncate_tail(raw: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let char_count = raw.chars().count();
+    if char_count <= max_chars {
+        return raw.to_string();
+    }
+
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let mut clipped = raw.chars().take(max_chars - 3).collect::<String>();
+    clipped.push_str("...");
+    clipped
+}
+
+fn build_loading_status_line(model: &TuiModel, now: DateTime<Utc>) -> String {
+    if !model.is_polling {
+        return "loading=off | refresh=none".to_string();
+    }
+
+    let elapsed_secs = model
+        .poll_started_at
+        .map(|started| (now - started).num_seconds().max(0))
+        .unwrap_or(0);
+    let refresh = if model.queued_refresh {
+        "queued"
+    } else {
+        "none"
+    };
+
+    format!("loading=on {}s | refresh={refresh}", elapsed_secs)
 }
 
 fn summarize_failure(failure: &FailureRecord) -> String {
@@ -393,7 +505,7 @@ fn summarize_failure(failure: &FailureRecord) -> String {
     }
     format!(
         "{} [{}:{}] {}",
-        failure.failed_at.to_rfc3339(),
+        format_status_time(Some(failure.failed_at)),
         failure.kind,
         failure.repo,
         clipped
@@ -404,9 +516,9 @@ fn timeline_inner_area(area: Rect) -> Rect {
     let vertical_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),
+            Constraint::Length(7),
             Constraint::Min(5),
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Length(3),
         ])
         .split(area);
@@ -446,7 +558,7 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from("q: quit, r: refresh, ?: toggle help"),
-        Line::from("up/down or j/k: move one item"),
+        Line::from("up/down or j/k: move one row"),
         Line::from("page up/page down: move one page"),
         Line::from("g/home: top, G/end: bottom"),
         Line::from("enter: open selected URL"),
@@ -476,4 +588,34 @@ fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
             Constraint::Percentage((100 - width_percent) / 2),
         ])
         .split(popup[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::{build_loading_status_line, truncate_tail, TuiModel};
+
+    #[test]
+    fn truncate_tail_adds_ellipsis_for_long_values() {
+        assert_eq!(truncate_tail("abcdef", 5), "ab...");
+        assert_eq!(truncate_tail("abc", 5), "abc");
+        assert_eq!(truncate_tail("abc", 2), "..");
+    }
+
+    #[test]
+    fn loading_status_line_reflects_queue_state() {
+        let started_at = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 5).unwrap();
+
+        let mut model = TuiModel::new(10);
+        model.is_polling = true;
+        model.poll_started_at = Some(started_at);
+        model.queued_refresh = true;
+
+        assert_eq!(
+            build_loading_status_line(&model, now),
+            "loading=on 5s | refresh=queued"
+        );
+    }
 }

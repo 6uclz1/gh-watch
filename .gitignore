@@ -1,0 +1,13 @@
+# Rust build artifacts
+/target/
+
+# Local runtime/config files
+/config.toml
+/state.db
+/state.sqlite
+
+# Common OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

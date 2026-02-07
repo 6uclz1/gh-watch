@@ -1,0 +1,30 @@
+use anyhow::Result;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+
+use crate::domain::events::WatchEvent;
+
+#[async_trait]
+pub trait GhClientPort: Send + Sync {
+    async fn check_auth(&self) -> Result<()>;
+    async fn fetch_repo_events(&self, repo: &str, since: DateTime<Utc>) -> Result<Vec<WatchEvent>>;
+}
+
+pub trait StateStorePort: Send + Sync {
+    fn get_cursor(&self, repo: &str) -> Result<Option<DateTime<Utc>>>;
+    fn set_cursor(&self, repo: &str, at: DateTime<Utc>) -> Result<()>;
+    fn is_event_notified(&self, event_key: &str) -> Result<bool>;
+    fn record_notified_event(&self, event: &WatchEvent, notified_at: DateTime<Utc>) -> Result<()>;
+    fn append_timeline_event(&self, event: &WatchEvent) -> Result<()>;
+    fn load_timeline_events(&self, limit: usize) -> Result<Vec<WatchEvent>>;
+    fn cleanup_old(&self, retention_days: u32, now: DateTime<Utc>) -> Result<()>;
+}
+
+pub trait NotifierPort: Send + Sync {
+    fn check_health(&self) -> Result<()>;
+    fn notify(&self, event: &WatchEvent, include_url: bool) -> Result<()>;
+}
+
+pub trait ClockPort: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}

@@ -1,0 +1,16 @@
+interval_seconds = 300
+timeline_limit = 500
+retention_days = 90
+# state_db_path = "/absolute/path/to/state.db"
+
+[notifications]
+enabled = true
+include_url = true
+
+[[repositories]]
+name = "owner/repo-one"
+enabled = true
+
+[[repositories]]
+name = "owner/repo-two"
+enabled = true

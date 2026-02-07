@@ -1,0 +1,18 @@
+[
+  {
+    "id": 9,
+    "number": 9,
+    "title": "Old pull",
+    "html_url": "https://example.com/pr/9",
+    "created_at": "2025-01-01T00:00:00Z",
+    "user": {"login": "alice"}
+  },
+  {
+    "id": 10,
+    "number": 10,
+    "title": "New pull",
+    "html_url": "https://example.com/pr/10",
+    "created_at": "2025-01-03T00:00:00Z",
+    "user": {"login": "bob"}
+  }
+]

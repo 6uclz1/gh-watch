@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::process::Command;
+use tokio::time::{sleep, Duration};
 
 use crate::{
     domain::events::{EventKind, WatchEvent},
@@ -13,6 +14,8 @@ use crate::{
 
 const PAGE_SIZE: usize = 100;
 const MAX_PAGES_PER_ENDPOINT: usize = 1000;
+const GH_EXEC_MAX_ATTEMPTS: usize = 5;
+const GH_EXEC_RETRY_BASE_MS: u64 = 20;
 
 #[derive(Debug, Clone)]
 pub struct GhCliClient {
@@ -36,9 +39,8 @@ impl GhCliClient {
     }
 
     async fn run_gh(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new(&self.gh_bin)
-            .args(args)
-            .output()
+        let output = self
+            .run_gh_with_retry(args)
             .await
             .with_context(|| format!("failed to execute gh command: {:?}", args))?;
 
@@ -52,6 +54,21 @@ impl GhCliClient {
         }
 
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    }
+
+    async fn run_gh_with_retry(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            match Command::new(&self.gh_bin).args(args).output().await {
+                Ok(output) => return Ok(output),
+                Err(err) if err.raw_os_error() == Some(26) && attempt < GH_EXEC_MAX_ATTEMPTS => {
+                    let wait_ms = GH_EXEC_RETRY_BASE_MS * attempt as u64;
+                    sleep(Duration::from_millis(wait_ms)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 }
 

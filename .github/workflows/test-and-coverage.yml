@@ -33,19 +33,18 @@ jobs:
 
       - name: Run tests and generate JUnit report
         run: |
-          mkdir -p target/nextest
           cargo nextest run \
             --workspace \
             --all-features \
             --no-fail-fast \
-            --junit-report target/nextest/junit.xml
+            --profile ci
 
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: junit-test-report
-          path: target/nextest/junit.xml
+          path: target/nextest/ci/junit.xml
           if-no-files-found: warn
 
       - name: Generate coverage reports

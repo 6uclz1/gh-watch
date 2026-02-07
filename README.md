@@ -56,6 +56,8 @@ gh-watch watch
 - 初回起動時は通知せず、カーソルのみ初期化
 - 通知済みイベントは SQLite で管理し、同一イベントの再通知を防止
 - 通知失敗時はカーソルを安全点まで巻き戻し、未通知イベントを次回ポーリングで再試行（at-least-once）
+- 監視/通知失敗は SQLite に永続化し、TUI の `latest_failure` で直近失敗を表示
+- 失敗履歴は `retention_days` と `failure_history_limit`（既定: 200件）で自動整理
 - 既定 state DB パス:
   - macOS/Linux: `~/.local/share/gh-watch/state.db`
   - Windows: `%LOCALAPPDATA%\\gh-watch\\state.db`

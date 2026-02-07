@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::path::Path;
 
 use chrono::{TimeZone, Utc};
@@ -321,4 +323,65 @@ exit 1
 
     assert!(msg.contains("max pages reached while fetching pulls"));
     assert!(msg.contains("limit=1000"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fetch_repo_events_retries_when_gh_binary_is_temporarily_busy() {
+    let dir = tempdir().unwrap();
+    let gh_path = dir.path().join("gh");
+
+    let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$1" == "auth" && "$2" == "status" ]]; then
+  exit 0
+fi
+
+if [[ "$1" != "api" ]]; then
+  echo "unexpected args: $*" >&2
+  exit 1
+fi
+
+endpoint="${@: -1}"
+
+if [[ "$endpoint" == "repos/acme/api/pulls"* ]]; then
+  echo '[]'
+  exit 0
+fi
+
+if [[ "$endpoint" == "repos/acme/api/issues"* ]]; then
+  echo '[]'
+  exit 0
+fi
+
+if [[ "$endpoint" == "repos/acme/api/issues/comments"* ]]; then
+  echo '[[]]'
+  exit 0
+fi
+
+if [[ "$endpoint" == "repos/acme/api/pulls/comments"* ]]; then
+  echo '[[]]'
+  exit 0
+fi
+
+echo "unexpected endpoint: $endpoint" >&2
+exit 1
+"#;
+
+    write_stub_gh(&gh_path, script);
+
+    // Hold the stub binary open for write briefly; Linux returns ETXTBSY for exec.
+    let busy_handle = OpenOptions::new().write(true).open(&gh_path).unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(90)).await;
+        drop(busy_handle);
+    });
+
+    let gh = GhCliClient::new_with_bin(&gh_path);
+    let since = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+    let events = gh.fetch_repo_events("acme/api", since).await.unwrap();
+    release.await.unwrap();
+
+    assert!(events.is_empty());
 }

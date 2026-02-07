@@ -8,6 +8,7 @@ use tokio::time::MissedTickBehavior;
 use crate::{
     app::poll_once::poll_once,
     config::Config,
+    domain::failure::{FailureRecord, FAILURE_KIND_POLL_LOOP},
     ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
     ui::tui::{handle_input, parse_input, InputCommand, TerminalUi, TuiModel},
 };
@@ -28,6 +29,7 @@ where
     let mut ui = TerminalUi::new()?;
     let mut model = TuiModel::new(config.timeline_limit);
     model.timeline = state.load_timeline_events(config.timeline_limit)?;
+    model.latest_failure = state.latest_failure()?;
     model.status_line = "ready".to_string();
     model.next_poll_at = Some(clock.now());
     ui.draw(&model)?;
@@ -58,10 +60,25 @@ where
                         );
                         model.failure_count += outcome.repo_errors.len() as u64;
                     }
+                    if let Some(last_failure) = outcome.failures.last().cloned() {
+                        model.latest_failure = Some(last_failure);
+                    }
                 }
                 Err(err) => {
                     model.failure_count += 1;
                     model.status_line = format!("poll failed: {err}");
+                    let failure = FailureRecord::new(
+                        FAILURE_KIND_POLL_LOOP,
+                        "<watch_loop>",
+                        clock.now(),
+                        err.to_string(),
+                    );
+                    if let Err(record_err) = state.record_failure(&failure) {
+                        model.status_line =
+                            format!("poll failed: {err} | failed to persist error: {record_err}");
+                    } else {
+                        model.latest_failure = Some(failure);
+                    }
                 }
             }
 

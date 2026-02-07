@@ -15,6 +15,8 @@ pub struct Config {
     pub timeline_limit: usize,
     #[serde(default = "default_retention_days")]
     pub retention_days: u32,
+    #[serde(default = "default_failure_history_limit")]
+    pub failure_history_limit: usize,
     pub state_db_path: Option<String>,
     pub repositories: Vec<RepositoryConfig>,
     #[serde(default)]
@@ -55,6 +57,10 @@ fn default_timeline_limit() -> usize {
 
 fn default_retention_days() -> u32 {
     90
+}
+
+fn default_failure_history_limit() -> usize {
+    200
 }
 
 fn default_true() -> bool {
@@ -148,6 +154,10 @@ fn validate_config(cfg: &Config) -> Result<()> {
 
     if cfg.timeline_limit == 0 {
         return Err(anyhow!("timeline_limit must be >= 1"));
+    }
+
+    if cfg.failure_history_limit == 0 {
+        return Err(anyhow!("failure_history_limit must be >= 1"));
     }
 
     Ok(())

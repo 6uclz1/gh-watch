@@ -74,6 +74,7 @@ exit 1
         interval_seconds: 300,
         timeline_limit: 500,
         retention_days: 90,
+        failure_history_limit: 200,
         state_db_path: None,
         repositories: vec![RepositoryConfig {
             name: "acme/api".to_string(),

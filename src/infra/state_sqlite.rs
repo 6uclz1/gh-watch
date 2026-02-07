@@ -4,7 +4,10 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{domain::events::WatchEvent, ports::StateStorePort};
+use crate::{
+    domain::{events::WatchEvent, failure::FailureRecord},
+    ports::StateStorePort,
+};
 
 pub struct SqliteStateStore {
     conn: Mutex<Connection>,
@@ -52,6 +55,17 @@ CREATE TABLE IF NOT EXISTS timeline_events (
   payload_json TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS failure_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  failed_at TEXT NOT NULL,
+  message TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_failure_events_failed_at
+ON failure_events (failed_at DESC, id DESC);
 ",
         )?;
         Ok(())
@@ -121,6 +135,47 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         Ok(())
     }
 
+    fn record_failure(&self, failure: &FailureRecord) -> Result<()> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        conn.execute(
+            "
+INSERT INTO failure_events (kind, repo, failed_at, message)
+VALUES (?1, ?2, ?3, ?4)
+",
+            params![
+                &failure.kind,
+                &failure.repo,
+                failure.failed_at.to_rfc3339(),
+                &failure.message,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn latest_failure(&self) -> Result<Option<FailureRecord>> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let row: Option<(String, String, String, String)> = conn
+            .query_row(
+                "
+SELECT kind, repo, failed_at, message
+FROM failure_events
+ORDER BY failed_at DESC, id DESC
+LIMIT 1
+",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+
+        row.map(
+            |(kind, repo, failed_at, message)| -> Result<FailureRecord> {
+                let parsed = DateTime::parse_from_rfc3339(&failed_at)?.with_timezone(&Utc);
+                Ok(FailureRecord::new(kind, repo, parsed, message))
+            },
+        )
+        .transpose()
+    }
+
     fn append_timeline_event(&self, event: &WatchEvent) -> Result<()> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let payload = serde_json::to_string(event)?;
@@ -155,7 +210,12 @@ LIMIT ?1
         Ok(items)
     }
 
-    fn cleanup_old(&self, retention_days: u32, now: DateTime<Utc>) -> Result<()> {
+    fn cleanup_old(
+        &self,
+        retention_days: u32,
+        failure_history_limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         let cutoff = now - Duration::days(retention_days as i64);
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         conn.execute(
@@ -165,6 +225,22 @@ LIMIT ?1
         conn.execute(
             "DELETE FROM timeline_events WHERE created_at < ?1",
             params![cutoff.to_rfc3339()],
+        )?;
+        conn.execute(
+            "DELETE FROM failure_events WHERE failed_at < ?1",
+            params![cutoff.to_rfc3339()],
+        )?;
+        conn.execute(
+            "
+DELETE FROM failure_events
+WHERE id IN (
+  SELECT id
+  FROM failure_events
+  ORDER BY failed_at DESC, id DESC
+  LIMIT -1 OFFSET ?1
+)
+",
+            params![failure_history_limit as i64],
         )?;
         Ok(())
     }

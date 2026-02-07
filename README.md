@@ -50,6 +50,7 @@ gh-watch watch
 - `q`: 終了
 - `r`: 手動更新
 - `↑` / `↓`: タイムライン移動
+- 右ペイン（`Watching Repositories`）は閲覧専用
 
 ## Behavior
 
@@ -61,6 +62,13 @@ gh-watch watch
 - 既定 state DB パス:
   - macOS/Linux: `~/.local/share/gh-watch/state.db`
   - Windows: `%LOCALAPPDATA%\\gh-watch\\state.db`
+
+## TUI Layout
+
+- Header: `status` / `last_success` / `next_poll` / `failures` / `latest_failure`
+- Main(左 70%): `Timeline`（新着順、`↑`/`↓`で選択）
+- Main(右 30%): `Watching Repositories`（`enabled=true` の repository 一覧、config 記載順）
+- Footer: キーガイド + 選択イベント URL
 
 ## Repository Notes
 

@@ -71,6 +71,15 @@ where
     }
 }
 
+fn enabled_repository_names(config: &Config) -> Vec<String> {
+    config
+        .repositories
+        .iter()
+        .filter(|repo| repo.enabled)
+        .map(|repo| repo.name.clone())
+        .collect()
+}
+
 pub async fn run_watch<C, S, N, K>(
     config: &Config,
     gh: &C,
@@ -86,6 +95,7 @@ where
 {
     let mut ui = TerminalUi::new()?;
     let mut model = TuiModel::new(config.timeline_limit);
+    model.watched_repositories = enabled_repository_names(config);
     model.timeline = state.load_timeline_events(config.timeline_limit)?;
     model.latest_failure = state.latest_failure()?;
     model.status_line = "ready".to_string();
@@ -175,8 +185,9 @@ mod tests {
     use anyhow::{anyhow, Result};
     use chrono::{TimeZone, Utc};
 
-    use super::{handle_stream_event, LoopControl};
+    use super::{enabled_repository_names, handle_stream_event, LoopControl};
     use crate::{
+        config::{Config, NotificationConfig, RepositoryConfig},
         domain::{events::WatchEvent, failure::FailureRecord},
         ports::{ClockPort, StateStorePort},
         ui::tui::TuiModel,
@@ -315,5 +326,38 @@ mod tests {
             .contains("failed to persist error: state store down"));
         assert!(model.latest_failure.is_none());
         assert!(state.latest_failure().unwrap().is_none());
+    }
+
+    #[test]
+    fn enabled_repository_names_keeps_config_order_and_filters_disabled() {
+        let config = Config {
+            interval_seconds: 300,
+            timeline_limit: 500,
+            retention_days: 90,
+            failure_history_limit: 200,
+            state_db_path: None,
+            repositories: vec![
+                RepositoryConfig {
+                    name: "acme/one".to_string(),
+                    enabled: true,
+                },
+                RepositoryConfig {
+                    name: "acme/two".to_string(),
+                    enabled: false,
+                },
+                RepositoryConfig {
+                    name: "acme/three".to_string(),
+                    enabled: true,
+                },
+            ],
+            notifications: NotificationConfig::default(),
+        };
+
+        let watched = enabled_repository_names(&config);
+
+        assert_eq!(
+            watched,
+            vec!["acme/one".to_string(), "acme/three".to_string()]
+        );
     }
 }

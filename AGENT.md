@@ -38,7 +38,7 @@
 - `src/domain/events.rs`: `EventKind`, `WatchEvent`
 - `src/domain/decision.rs`: 通知判定/タイムライン整形
 - `src/app/poll_once.rs`: 1サイクルの監視ユースケース
-- `src/app/watch_loop.rs`: 定期実行 + TUI入力のイベントループ
+- `src/app/watch_loop.rs`: 定期実行 + TUI入力のイベントループ（enabled repo一覧をTUIモデルへ供給）
 - `src/infra/gh_client.rs`: `gh api` 実行とJSON正規化
 - `src/infra/state_sqlite.rs`: SQLite永続化
 - `src/infra/notifier/*`: OS別通知実装
@@ -96,7 +96,8 @@
 
 ## TUI仕様（実装済み）
 - Header: status / last_success / next_poll / failures
-- Main: タイムライン（新着順、選択可能）
+- Main(left 70%): タイムライン（新着順、選択可能）
+- Main(right 30%): Watching Repositories（enabled=true の監視対象repo、config記載順、閲覧専用）
 - Footer: キーガイド + 選択イベントURL
 
 ## 通知実装

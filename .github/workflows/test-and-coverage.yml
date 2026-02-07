@@ -1,0 +1,75 @@
+name: Test and Coverage Report
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-coverage:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run tests and generate JUnit report
+        run: |
+          cargo nextest run \
+            --workspace \
+            --all-features \
+            --no-fail-fast \
+            --profile ci
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-test-report
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+      - name: Generate coverage reports
+        run: |
+          mkdir -p target/llvm-cov
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov \
+            --workspace \
+            --all-features \
+            --lcov \
+            --output-path target/llvm-cov/lcov.info
+          cargo llvm-cov report --summary-only > target/llvm-cov/summary.txt
+
+      - name: Add coverage summary to job summary
+        run: |
+          echo "## Coverage Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat target/llvm-cov/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            target/llvm-cov/lcov.info
+            target/llvm-cov/summary.txt
+          if-no-files-found: error

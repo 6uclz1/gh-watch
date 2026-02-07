@@ -3,7 +3,10 @@ use chrono::{Duration, Utc};
 
 use crate::{
     config::Config,
-    domain::events::WatchEvent,
+    domain::{
+        events::WatchEvent,
+        failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL},
+    },
     ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
 };
 
@@ -12,6 +15,7 @@ pub struct PollOutcome {
     pub notified_count: usize,
     pub bootstrap_repos: usize,
     pub repo_errors: Vec<String>,
+    pub failures: Vec<FailureRecord>,
     pub notified_events: Vec<WatchEvent>,
     pub timeline_events: Vec<WatchEvent>,
 }
@@ -30,7 +34,7 @@ where
     K: ClockPort,
 {
     let now = clock.now();
-    state.cleanup_old(config.retention_days, now)?;
+    state.cleanup_old(config.retention_days, config.failure_history_limit, now)?;
 
     let mut outcome = PollOutcome::default();
 
@@ -50,6 +54,16 @@ where
         let events = match gh.fetch_repo_events(&repo.name, since).await {
             Ok(events) => events,
             Err(err) => {
+                let failure = FailureRecord::new(
+                    FAILURE_KIND_REPO_POLL,
+                    repo.name.clone(),
+                    clock.now(),
+                    err.to_string(),
+                );
+                state.record_failure(&failure).with_context(|| {
+                    format!("failed to record repo polling failure for {}", repo.name)
+                })?;
+                outcome.failures.push(failure);
                 outcome.repo_errors.push(format!("{}: {}", repo.name, err));
                 continue;
             }
@@ -67,6 +81,19 @@ where
                 match notifier.notify(&event, config.notifications.include_url) {
                     Ok(_) => {}
                     Err(err) => {
+                        let failure = FailureRecord::new(
+                            FAILURE_KIND_NOTIFICATION,
+                            event.repo.clone(),
+                            clock.now(),
+                            format!("{}: {}", event.event_key(), err),
+                        );
+                        state.record_failure(&failure).with_context(|| {
+                            format!(
+                                "failed to record notification failure for {}",
+                                event.event_key()
+                            )
+                        })?;
+                        outcome.failures.push(failure);
                         outcome.repo_errors.push(format!(
                             "notification failed for {}: {}",
                             event.event_key(),

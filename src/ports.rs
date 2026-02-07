@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::domain::events::WatchEvent;
+use crate::domain::{events::WatchEvent, failure::FailureRecord};
 
 #[async_trait]
 pub trait GhClientPort: Send + Sync {
@@ -15,9 +15,16 @@ pub trait StateStorePort: Send + Sync {
     fn set_cursor(&self, repo: &str, at: DateTime<Utc>) -> Result<()>;
     fn is_event_notified(&self, event_key: &str) -> Result<bool>;
     fn record_notified_event(&self, event: &WatchEvent, notified_at: DateTime<Utc>) -> Result<()>;
+    fn record_failure(&self, failure: &FailureRecord) -> Result<()>;
+    fn latest_failure(&self) -> Result<Option<FailureRecord>>;
     fn append_timeline_event(&self, event: &WatchEvent) -> Result<()>;
     fn load_timeline_events(&self, limit: usize) -> Result<Vec<WatchEvent>>;
-    fn cleanup_old(&self, retention_days: u32, now: DateTime<Utc>) -> Result<()>;
+    fn cleanup_old(
+        &self,
+        retention_days: u32,
+        failure_history_limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
 }
 
 pub trait NotifierPort: Send + Sync {

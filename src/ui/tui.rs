@@ -16,7 +16,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use crate::domain::events::WatchEvent;
+use crate::domain::{events::WatchEvent, failure::FailureRecord};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputCommand {
@@ -33,6 +33,7 @@ pub struct TuiModel {
     pub selected: usize,
     pub status_line: String,
     pub failure_count: u64,
+    pub latest_failure: Option<FailureRecord>,
     pub last_success_at: Option<DateTime<Utc>>,
     pub next_poll_at: Option<DateTime<Utc>>,
     limit: usize,
@@ -45,6 +46,7 @@ impl TuiModel {
             selected: 0,
             status_line: "starting".to_string(),
             failure_count: 0,
+            latest_failure: None,
             last_success_at: None,
             next_poll_at: None,
             limit,
@@ -119,7 +121,7 @@ fn render(frame: &mut Frame<'_>, model: &TuiModel) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Min(5),
             Constraint::Length(3),
         ])
@@ -133,6 +135,11 @@ fn render(frame: &mut Frame<'_>, model: &TuiModel) {
         .next_poll_at
         .map(|d| d.to_rfc3339())
         .unwrap_or_else(|| "-".to_string());
+    let latest_failure = model
+        .latest_failure
+        .as_ref()
+        .map(summarize_failure)
+        .unwrap_or_else(|| "-".to_string());
 
     let header = Paragraph::new(vec![
         Line::from(vec![Span::styled(
@@ -145,6 +152,7 @@ fn render(frame: &mut Frame<'_>, model: &TuiModel) {
             "status={} | last_success={} | next_poll={} | failures={}",
             model.status_line, last_success, next_poll, model.failure_count
         )),
+        Line::from(format!("latest_failure={latest_failure}")),
     ])
     .block(Block::default().borders(Borders::ALL).title("Status"));
     frame.render_widget(header, areas[0]);
@@ -189,4 +197,19 @@ fn render(frame: &mut Frame<'_>, model: &TuiModel) {
     let footer =
         Paragraph::new(footer_text).block(Block::default().borders(Borders::ALL).title("Keys"));
     frame.render_widget(footer, areas[2]);
+}
+
+fn summarize_failure(failure: &FailureRecord) -> String {
+    let msg = failure.message.replace('\n', " ");
+    let mut clipped = msg.chars().take(96).collect::<String>();
+    if msg.chars().count() > 96 {
+        clipped.push_str("...");
+    }
+    format!(
+        "{} [{}:{}] {}",
+        failure.failed_at.to_rfc3339(),
+        failure.kind,
+        failure.repo,
+        clipped
+    )
 }

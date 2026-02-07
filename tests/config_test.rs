@@ -24,8 +24,22 @@ name = "octocat/hello-world"
     assert_eq!(cfg.interval_seconds, 300);
     assert_eq!(cfg.timeline_limit, 500);
     assert_eq!(cfg.retention_days, 90);
+    assert_eq!(cfg.failure_history_limit, 200);
     assert_eq!(cfg.repositories.len(), 1);
     assert!(cfg.repositories[0].enabled);
     assert!(cfg.notifications.enabled);
     assert!(cfg.notifications.include_url);
+}
+
+#[test]
+fn parse_config_rejects_zero_failure_history_limit() {
+    let src = r#"
+failure_history_limit = 0
+
+[[repositories]]
+name = "octocat/hello-world"
+"#;
+
+    let err = parse_config(src).expect_err("zero limit should fail");
+    assert!(err.to_string().contains("failure_history_limit"));
 }

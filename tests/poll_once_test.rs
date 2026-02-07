@@ -7,6 +7,7 @@ use chrono::{TimeZone, Utc};
 use gh_watch::app::poll_once::poll_once;
 use gh_watch::config::{Config, NotificationConfig, RepositoryConfig};
 use gh_watch::domain::events::{EventKind, WatchEvent};
+use gh_watch::domain::failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL};
 use gh_watch::ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort};
 
 #[derive(Clone, Default)]
@@ -51,6 +52,7 @@ struct FakeState {
     cursors: Arc<Mutex<HashMap<String, chrono::DateTime<Utc>>>>,
     notified: Arc<Mutex<HashMap<String, WatchEvent>>>,
     timeline: Arc<Mutex<Vec<WatchEvent>>>,
+    failures: Arc<Mutex<Vec<FailureRecord>>>,
 }
 
 impl StateStorePort for FakeState {
@@ -84,6 +86,15 @@ impl StateStorePort for FakeState {
         Ok(())
     }
 
+    fn record_failure(&self, failure: &FailureRecord) -> Result<()> {
+        self.failures.lock().unwrap().push(failure.clone());
+        Ok(())
+    }
+
+    fn latest_failure(&self) -> Result<Option<FailureRecord>> {
+        Ok(self.failures.lock().unwrap().last().cloned())
+    }
+
     fn load_timeline_events(&self, limit: usize) -> Result<Vec<WatchEvent>> {
         let mut items = self.timeline.lock().unwrap().clone();
         items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -91,7 +102,12 @@ impl StateStorePort for FakeState {
         Ok(items)
     }
 
-    fn cleanup_old(&self, _retention_days: u32, _now: chrono::DateTime<Utc>) -> Result<()> {
+    fn cleanup_old(
+        &self,
+        _retention_days: u32,
+        _failure_history_limit: usize,
+        _now: chrono::DateTime<Utc>,
+    ) -> Result<()> {
         Ok(())
     }
 }
@@ -139,6 +155,7 @@ fn cfg() -> Config {
         interval_seconds: 300,
         timeline_limit: 500,
         retention_days: 90,
+        failure_history_limit: 200,
         state_db_path: None,
         repositories: vec![
             RepositoryConfig {
@@ -265,6 +282,9 @@ async fn repo_failure_does_not_block_others() {
 
     assert_eq!(out.notified_count, 1);
     assert_eq!(out.repo_errors.len(), 1);
+    assert_eq!(out.failures.len(), 1);
+    assert_eq!(out.failures[0].kind, FAILURE_KIND_REPO_POLL);
+    assert_eq!(out.failures[0].repo, "acme/api");
 }
 
 #[tokio::test]
@@ -311,6 +331,8 @@ async fn notification_failure_retries_failed_event_without_duplicating_successes
         .unwrap();
     assert_eq!(out1.notified_count, 1);
     assert_eq!(out1.repo_errors.len(), 1);
+    assert_eq!(out1.failures.len(), 1);
+    assert_eq!(out1.failures[0].kind, FAILURE_KIND_NOTIFICATION);
     assert_eq!(
         state.get_cursor("acme/api").unwrap().unwrap(),
         event_time - chrono::Duration::nanoseconds(1)
@@ -321,6 +343,7 @@ async fn notification_failure_retries_failed_event_without_duplicating_successes
         .unwrap();
     assert_eq!(out2.notified_count, 1);
     assert!(out2.repo_errors.is_empty());
+    assert!(out2.failures.is_empty());
     assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c2.now);
 
     let out3 = poll_once(&cfg(), &gh, &state, &notifier, &c3)
@@ -328,6 +351,7 @@ async fn notification_failure_retries_failed_event_without_duplicating_successes
         .unwrap();
     assert_eq!(out3.notified_count, 0);
     assert!(out3.repo_errors.is_empty());
+    assert!(out3.failures.is_empty());
 
     assert_eq!(
         notifier.sent.lock().unwrap().as_slice(),

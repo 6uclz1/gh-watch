@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{Duration, Utc};
 
 use crate::{
     config::Config,
@@ -53,6 +54,7 @@ where
                 continue;
             }
         };
+        let mut earliest_notification_failure_at: Option<chrono::DateTime<Utc>> = None;
 
         for event in events {
             let event_key = event.event_key();
@@ -70,6 +72,11 @@ where
                             event.event_key(),
                             err
                         ));
+                        earliest_notification_failure_at = Some(
+                            earliest_notification_failure_at
+                                .map(|at| at.min(event.created_at))
+                                .unwrap_or(event.created_at),
+                        );
                         // Keep the event unrecorded if notification delivery failed.
                         continue;
                     }
@@ -83,8 +90,17 @@ where
             outcome.timeline_events.push(event);
         }
 
+        let next_cursor = if let Some(failure_at) = earliest_notification_failure_at {
+            // Keep failed events in the next query window (`created_at > cursor`).
+            failure_at
+                .checked_sub_signed(Duration::nanoseconds(1))
+                .unwrap_or(since)
+        } else {
+            now
+        };
+
         state
-            .set_cursor(&repo.name, now)
+            .set_cursor(&repo.name, next_cursor)
             .with_context(|| format!("failed to update cursor for {}", repo.name))?;
     }
 

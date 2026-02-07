@@ -55,6 +55,7 @@ gh-watch watch
 
 - 初回起動時は通知せず、カーソルのみ初期化
 - 通知済みイベントは SQLite で管理し、同一イベントの再通知を防止
+- 通知失敗時はカーソルを安全点まで巻き戻し、未通知イベントを次回ポーリングで再試行（at-least-once）
 - 既定 state DB パス:
   - macOS/Linux: `~/.local/share/gh-watch/state.db`
   - Windows: `%LOCALAPPDATA%\\gh-watch\\state.db`

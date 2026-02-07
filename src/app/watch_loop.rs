@@ -1,8 +1,9 @@
-use std::time::Duration;
+use std::{process::Command, time::Duration};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crossterm::event::Event;
 use futures_util::StreamExt;
+use ratatui::layout::Rect;
 use tokio::time::MissedTickBehavior;
 
 use crate::{
@@ -10,7 +11,7 @@ use crate::{
     config::Config,
     domain::failure::{FailureRecord, FAILURE_KIND_INPUT_STREAM, FAILURE_KIND_POLL_LOOP},
     ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
-    ui::tui::{handle_input, parse_input, InputCommand, TerminalUi, TuiModel},
+    ui::tui::{handle_input, parse_input, parse_mouse_input, InputCommand, TerminalUi, TuiModel},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +27,8 @@ fn handle_stream_event<S, K>(
     model: &mut TuiModel,
     state: &S,
     clock: &K,
+    terminal_area: Rect,
+    open_url: &dyn Fn(&str) -> Result<()>,
 ) -> LoopControl
 where
     S: StateStorePort,
@@ -37,11 +40,44 @@ where
             match cmd {
                 InputCommand::Quit => LoopControl::Quit,
                 InputCommand::Refresh => LoopControl::RequestPoll,
-                InputCommand::ScrollUp | InputCommand::ScrollDown => {
+                InputCommand::OpenSelectedUrl => {
+                    let Some(url) = model
+                        .timeline
+                        .get(model.selected)
+                        .map(|event| event.url.clone())
+                    else {
+                        return LoopControl::Continue;
+                    };
+
+                    match open_url(&url) {
+                        Ok(()) => {
+                            model.status_line = format!("opened: {url}");
+                        }
+                        Err(err) => {
+                            model.status_line = format!("open failed: {err}");
+                        }
+                    }
+                    LoopControl::Redraw
+                }
+                InputCommand::ScrollUp
+                | InputCommand::ScrollDown
+                | InputCommand::SelectIndex(_) => {
                     handle_input(model, cmd);
                     LoopControl::Redraw
                 }
                 InputCommand::None => LoopControl::Continue,
+            }
+        }
+        Some(Ok(Event::Mouse(mouse))) => {
+            let cmd = parse_mouse_input(mouse, terminal_area, model);
+            match cmd {
+                InputCommand::ScrollUp
+                | InputCommand::ScrollDown
+                | InputCommand::SelectIndex(_) => {
+                    handle_input(model, cmd);
+                    LoopControl::Redraw
+                }
+                _ => LoopControl::Continue,
             }
         }
         Some(Ok(_)) => LoopControl::Continue,
@@ -100,7 +136,7 @@ where
     model.latest_failure = state.latest_failure()?;
     model.status_line = "ready".to_string();
     model.next_poll_at = Some(clock.now());
-    ui.draw(&model)?;
+    ui.draw(&mut model)?;
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_seconds));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -110,7 +146,7 @@ where
     loop {
         if force_poll {
             model.status_line = "polling".to_string();
-            ui.draw(&model)?;
+            ui.draw(&mut model)?;
 
             match poll_once(config, gh, state, notifier, clock).await {
                 Ok(outcome) => {
@@ -152,7 +188,7 @@ where
 
             model.next_poll_at =
                 Some(clock.now() + chrono::Duration::seconds(config.interval_seconds as i64));
-            ui.draw(&model)?;
+            ui.draw(&mut model)?;
             force_poll = false;
         }
 
@@ -161,13 +197,21 @@ where
                 force_poll = true;
             }
             maybe_event = reader.next() => {
-                match handle_stream_event(maybe_event, &mut model, state, clock) {
+                let terminal_area = ui.terminal_area().unwrap_or_default();
+                match handle_stream_event(
+                    maybe_event,
+                    &mut model,
+                    state,
+                    clock,
+                    terminal_area,
+                    &open_url_in_browser,
+                ) {
                     LoopControl::Quit => break,
                     LoopControl::RequestPoll => {
                         force_poll = true;
                     }
                     LoopControl::Redraw => {
-                        ui.draw(&model)?;
+                        ui.draw(&mut model)?;
                     }
                     LoopControl::Continue => {}
                 }
@@ -178,17 +222,70 @@ where
     Ok(())
 }
 
+fn open_url_in_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let ok = Command::new("open")
+            .arg(url)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if ok {
+            return Ok(());
+        }
+
+        return Err(anyhow!("failed to open URL with open: {url}"));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let ok = Command::new("xdg-open")
+            .arg(url)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if ok {
+            return Ok(());
+        }
+
+        return Err(anyhow!("failed to open URL with xdg-open: {url}"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let ok = Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(url)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if ok {
+            return Ok(());
+        }
+
+        return Err(anyhow!("failed to open URL with start: {url}"));
+    }
+
+    #[allow(unreachable_code)]
+    Err(anyhow!("unsupported OS for opening URLs"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use anyhow::{anyhow, Result};
     use chrono::{TimeZone, Utc};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
 
     use super::{enabled_repository_names, handle_stream_event, LoopControl};
     use crate::{
         config::{Config, NotificationConfig, RepositoryConfig},
-        domain::{events::WatchEvent, failure::FailureRecord},
+        domain::{
+            events::{EventKind, WatchEvent},
+            failure::FailureRecord,
+        },
         ports::{ClockPort, StateStorePort},
         ui::tui::TuiModel,
     };
@@ -266,6 +363,14 @@ mod tests {
         }
     }
 
+    fn test_area() -> Rect {
+        Rect::new(0, 0, 120, 40)
+    }
+
+    fn open_ok(_url: &str) -> Result<()> {
+        Ok(())
+    }
+
     #[test]
     fn stream_error_is_recorded_for_traceability() {
         let state = FakeState::default();
@@ -282,6 +387,8 @@ mod tests {
             &mut model,
             &state,
             &clock,
+            test_area(),
+            &open_ok,
         );
 
         assert_eq!(control, LoopControl::Redraw);
@@ -316,6 +423,8 @@ mod tests {
             &mut model,
             &state,
             &clock,
+            test_area(),
+            &open_ok,
         );
 
         assert_eq!(control, LoopControl::Redraw);
@@ -359,5 +468,75 @@ mod tests {
             watched,
             vec!["acme/one".to_string(), "acme/three".to_string()]
         );
+    }
+
+    #[test]
+    fn enter_opens_selected_url_and_requests_redraw() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 0, 0, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+        model.timeline = vec![WatchEvent {
+            event_id: "ev1".to_string(),
+            repo: "acme/api".to_string(),
+            kind: EventKind::IssueCommentCreated,
+            actor: "dev".to_string(),
+            title: "comment".to_string(),
+            url: "https://example.com/ev1".to_string(),
+            created_at: clock.now,
+            source_item_id: "ev1".to_string(),
+        }];
+        model.selected = 0;
+
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(key))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert!(model
+            .status_line
+            .contains("opened: https://example.com/ev1"));
+    }
+
+    #[test]
+    fn enter_open_failure_updates_status_and_keeps_loop_alive() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+        model.timeline = vec![WatchEvent {
+            event_id: "ev2".to_string(),
+            repo: "acme/api".to_string(),
+            kind: EventKind::IssueCommentCreated,
+            actor: "dev".to_string(),
+            title: "comment".to_string(),
+            url: "https://example.com/ev2".to_string(),
+            created_at: clock.now,
+            source_item_id: "ev2".to_string(),
+        }];
+        model.selected = 0;
+
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(key))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &|_| Err(anyhow!("browser unavailable")),
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert!(model
+            .status_line
+            .contains("open failed: browser unavailable"));
     }
 }

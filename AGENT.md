@@ -12,6 +12,8 @@
 - `gh-watch watch [--config <path>] [--interval-seconds <n>]`
 - `gh-watch check [--config <path>]`
 - `gh-watch init [--path <path>] [--force]`
+- `gh-watch config open` (`gh-watch config edit` は別名)
+- `gh-watch config path`
 
 ### `watch` の挙動
 - 起動時に `gh auth status` を検証し、失敗時は即終了
@@ -25,8 +27,16 @@
 - state DB の初期化確認
 
 ### `init` の挙動
-- 設定テンプレートを `config.toml`（または `--path`）に生成
+- 設定テンプレートを `--path` 指定先、またはバイナリ配置先の `config.toml` に生成
 - 既存ファイルがある場合は `--force` なしで失敗
+
+### `config` の挙動
+- `config open` / `config edit`
+  - バイナリ配置先 `config.toml` を開く
+  - 起動優先順: `VISUAL` -> `EDITOR` -> OS既定オープナー
+  - config 未作成時は `gh-watch init` を案内して失敗
+- `config path`
+  - 現在参照する既定 config パスを表示
 
 ## 設計方針（現在実装）
 - レイヤ分割: `domain` / `app` / `infra` / `ui` / `cli`
@@ -45,13 +55,8 @@
 - `src/ui/tui.rs`: TUIモデル・入力変換・描画
 
 ## 設定仕様（実装済み）
-- `--config` 省略時の探索順
-  - `./config.toml`
-  - `GH_WATCH_CONFIG`
-  - 既定パス
-- 既定 config パス
-  - macOS/Linux: `~/.config/gh-watch/config.toml`
-  - Windows: `%APPDATA%\\gh-watch\\config.toml`
+- `--config` を指定した場合は明示パスを読む
+- `--config` 省略時は、実行中バイナリの親ディレクトリにある `config.toml` を読む
 - 既定 state DB パス
   - macOS/Linux: `~/.local/share/gh-watch/state.db`
   - Windows: `%LOCALAPPDATA%\\gh-watch\\state.db`
@@ -109,6 +114,7 @@
 ## テスト状況
 - テストファイル群
   - `tests/config_test.rs`
+  - `tests/config_cmd_test.rs`
   - `tests/domain_decision_test.rs`
   - `tests/state_sqlite_test.rs`
   - `tests/gh_normalization_test.rs`

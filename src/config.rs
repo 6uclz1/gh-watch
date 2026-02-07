@@ -76,8 +76,12 @@ pub fn parse_config(src: &str) -> Result<Config> {
 pub fn load_config(path: Option<&Path>) -> Result<Config> {
     let config_path = resolve_config_path(path)?;
 
-    let src = fs::read_to_string(&config_path)
-        .with_context(|| format!("failed to read config: {}", config_path.display()))?;
+    let src = fs::read_to_string(&config_path).with_context(|| {
+        format!(
+            "failed to read config: {} (run `gh-watch init` to create it, or pass `--config <path>`)",
+            config_path.display()
+        )
+    })?;
     parse_config(&src)
 }
 
@@ -86,30 +90,18 @@ pub fn resolve_config_path(path: Option<&Path>) -> Result<PathBuf> {
         return Ok(explicit.to_path_buf());
     }
 
-    let local = PathBuf::from("config.toml");
-    if local.exists() {
-        return Ok(local);
-    }
-
-    if let Some(raw) = env::var_os("GH_WATCH_CONFIG") {
-        return Ok(PathBuf::from(raw));
-    }
-
-    default_config_path()
+    installed_config_path()
 }
 
-pub fn default_config_path() -> Result<PathBuf> {
-    #[cfg(windows)]
-    {
-        let appdata = env::var_os("APPDATA").ok_or_else(|| anyhow!("APPDATA is not set"))?;
-        return Ok(PathBuf::from(appdata).join("gh-watch").join("config.toml"));
-    }
-
-    #[cfg(not(windows))]
-    {
-        let home = home_dir()?;
-        Ok(home.join(".config").join("gh-watch").join("config.toml"))
-    }
+pub fn installed_config_path() -> Result<PathBuf> {
+    let exe = env::current_exe().context("could not determine current executable path")?;
+    let dir = exe.parent().ok_or_else(|| {
+        anyhow!(
+            "current executable has no parent directory: {}",
+            exe.display()
+        )
+    })?;
+    Ok(dir.join("config.toml"))
 }
 
 pub fn default_state_db_path() -> Result<PathBuf> {

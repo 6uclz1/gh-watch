@@ -1,4 +1,9 @@
-use std::{fs, path::PathBuf};
+use std::{
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -6,7 +11,9 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     app::watch_loop::run_watch,
-    config::{default_state_db_path, load_config, Config},
+    config::{
+        default_state_db_path, installed_config_path, load_config, resolve_config_path, Config,
+    },
     infra::{gh_client::GhCliClient, notifier::DesktopNotifier, state_sqlite::SqliteStateStore},
     ports::{ClockPort, GhClientPort, NotifierPort},
 };
@@ -34,11 +41,22 @@ enum Commands {
         config: Option<PathBuf>,
     },
     Init {
-        #[arg(long, default_value = "config.toml")]
-        path: PathBuf,
+        #[arg(long)]
+        path: Option<PathBuf>,
         #[arg(long)]
         force: bool,
     },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommands {
+    #[command(alias = "edit")]
+    Open,
+    Path,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -65,7 +83,11 @@ pub async fn run() -> Result<()> {
             run_watch_cmd(cfg).await
         }
         Commands::Check { config } => run_check_cmd(load_config(config.as_deref())?).await,
-        Commands::Init { path, force } => run_init_cmd(path, force),
+        Commands::Init { path, force } => {
+            let path = path.unwrap_or(installed_config_path()?);
+            run_init_cmd(path, force)
+        }
+        Commands::Config { command } => run_config_cmd(command),
     }
 }
 
@@ -112,6 +134,104 @@ fn resolve_state_db_path(cfg: &Config) -> Result<PathBuf> {
         Some(raw) => Ok(PathBuf::from(raw)),
         None => default_state_db_path(),
     }
+}
+
+fn run_config_cmd(command: ConfigCommands) -> Result<()> {
+    match command {
+        ConfigCommands::Open => run_config_open_cmd(),
+        ConfigCommands::Path => run_config_path_cmd(),
+    }
+}
+
+fn run_config_open_cmd() -> Result<()> {
+    let path = resolve_config_path(None)?;
+    if !path.exists() {
+        return Err(anyhow!(
+            "config does not exist: {} (run `gh-watch init` first)",
+            path.display()
+        ));
+    }
+
+    open_config_file(&path)
+}
+
+fn run_config_path_cmd() -> Result<()> {
+    let path = resolve_config_path(None)?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn open_config_file(path: &Path) -> Result<()> {
+    if let Some(raw) = std::env::var_os("VISUAL") {
+        if try_editor_command(&raw, path)? {
+            return Ok(());
+        }
+    }
+
+    if let Some(raw) = std::env::var_os("EDITOR") {
+        if try_editor_command(&raw, path)? {
+            return Ok(());
+        }
+    }
+
+    if try_os_default_opener(path)? {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "failed to open config: {} (tried VISUAL, EDITOR, and OS default opener)",
+        path.display()
+    ))
+}
+
+fn try_editor_command(raw: &OsStr, path: &Path) -> Result<bool> {
+    let raw = raw.to_string_lossy();
+    let mut tokens = raw.split_whitespace();
+    let Some(bin) = tokens.next() else {
+        return Ok(false);
+    };
+
+    let mut cmd = Command::new(bin);
+    cmd.args(tokens);
+    cmd.arg(path);
+    let ok = cmd.status().map(|status| status.success()).unwrap_or(false);
+    Ok(ok)
+}
+
+fn try_os_default_opener(path: &Path) -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        let ok = Command::new("open")
+            .arg(path)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        return Ok(ok);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let ok = Command::new("xdg-open")
+            .arg(path)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        return Ok(ok);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let ok = Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        return Ok(ok);
+    }
+
+    #[allow(unreachable_code)]
+    Ok(false)
 }
 
 fn run_init_cmd(path: PathBuf, force: bool) -> Result<()> {

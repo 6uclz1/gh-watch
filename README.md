@@ -22,28 +22,38 @@ cargo install --git https://github.com/6uclz1/gh-watch gh-watch
 gh-watch init
 ```
 
-2. `config.toml` の `[[repositories]]` を自分の監視対象に編集
+2. 設定ファイルをエディタで開く（`edit` は `open` の別名）
 
-3. 事前チェック
+```bash
+gh-watch config open
+# または
+gh-watch config edit
+```
+
+3. `config.toml` の `[[repositories]]` を自分の監視対象に編集
+
+4. 事前チェック
 
 ```bash
 gh-watch check
 ```
 
-4. 常駐監視 + TUI 起動
+5. 常駐監視 + TUI 起動
 
 ```bash
 gh-watch watch
 ```
 
-`--config` を省略した場合の探索順:
-- `./config.toml`
-- `GH_WATCH_CONFIG` 環境変数
-- 既定パス
+設定ファイルの既定位置:
+- 実行中 `gh-watch` バイナリと同じディレクトリの `config.toml`
 
-既定パス:
-- macOS/Linux: `~/.config/gh-watch/config.toml`
-- Windows: `%APPDATA%\\gh-watch\\config.toml`
+確認コマンド:
+
+```bash
+gh-watch config path
+```
+
+`watch` / `check` で `--config` を指定した場合のみ、明示パスを優先します。
 
 ## Key Bindings
 

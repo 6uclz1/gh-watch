@@ -11,6 +11,7 @@
 ## 現在の公開CLI
 - `gh-watch watch [--config <path>] [--interval-seconds <n>]`
 - `gh-watch check [--config <path>]`
+- `gh-watch init [--path <path>] [--force]`
 
 ### `watch` の挙動
 - 起動時に `gh auth status` を検証し、失敗時は即終了
@@ -22,6 +23,10 @@
 - `gh auth status` 検証
 - 通知バックエンド健全性確認
 - state DB の初期化確認
+
+### `init` の挙動
+- 設定テンプレートを `config.toml`（または `--path`）に生成
+- 既存ファイルがある場合は `--force` なしで失敗
 
 ## 設計方針（現在実装）
 - レイヤ分割: `domain` / `app` / `infra` / `ui` / `cli`
@@ -40,6 +45,10 @@
 - `src/ui/tui.rs`: TUIモデル・入力変換・描画
 
 ## 設定仕様（実装済み）
+- `--config` 省略時の探索順
+  - `./config.toml`
+  - `GH_WATCH_CONFIG`
+  - 既定パス
 - 既定 config パス
   - macOS/Linux: `~/.config/gh-watch/config.toml`
   - Windows: `%APPDATA%\\gh-watch\\config.toml`

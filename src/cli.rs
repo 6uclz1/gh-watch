@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 
@@ -33,6 +33,12 @@ enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    Init {
+        #[arg(long, default_value = "config.toml")]
+        path: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +65,7 @@ pub async fn run() -> Result<()> {
             run_watch_cmd(cfg).await
         }
         Commands::Check { config } => run_check_cmd(load_config(config.as_deref())?).await,
+        Commands::Init { path, force } => run_init_cmd(path, force),
     }
 }
 
@@ -105,4 +112,28 @@ fn resolve_state_db_path(cfg: &Config) -> Result<PathBuf> {
         Some(raw) => Ok(PathBuf::from(raw)),
         None => default_state_db_path(),
     }
+}
+
+fn run_init_cmd(path: PathBuf, force: bool) -> Result<()> {
+    if path.exists() && !force {
+        return Err(anyhow!(
+            "config already exists: {} (use --force to overwrite)",
+            path.display()
+        ));
+    }
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create config directory: {}", parent.display())
+            })?;
+        }
+    }
+
+    fs::write(&path, include_str!("../config.example.toml"))
+        .with_context(|| format!("failed to write config: {}", path.display()))?;
+
+    println!("created config: {}", path.display());
+    println!("next: edit [[repositories]] in the config file");
+    Ok(())
 }

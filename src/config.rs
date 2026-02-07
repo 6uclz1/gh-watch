@@ -1,10 +1,7 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
-
-#[cfg(windows)]
-use std::env;
 
 use anyhow::{anyhow, Context, Result};
 use directories::BaseDirs;
@@ -71,14 +68,28 @@ pub fn parse_config(src: &str) -> Result<Config> {
 }
 
 pub fn load_config(path: Option<&Path>) -> Result<Config> {
-    let config_path = match path {
-        Some(p) => p.to_path_buf(),
-        None => default_config_path()?,
-    };
+    let config_path = resolve_config_path(path)?;
 
     let src = fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read config: {}", config_path.display()))?;
     parse_config(&src)
+}
+
+pub fn resolve_config_path(path: Option<&Path>) -> Result<PathBuf> {
+    if let Some(explicit) = path {
+        return Ok(explicit.to_path_buf());
+    }
+
+    let local = PathBuf::from("config.toml");
+    if local.exists() {
+        return Ok(local);
+    }
+
+    if let Some(raw) = env::var_os("GH_WATCH_CONFIG") {
+        return Ok(PathBuf::from(raw));
+    }
+
+    default_config_path()
 }
 
 pub fn default_config_path() -> Result<PathBuf> {

@@ -8,12 +8,18 @@ GitHub の PR / Issue / コメントを定期監視し、重複なしでデス�
 - `gh` CLI
 - GitHub 認証済みの `gh` (`gh auth login -h github.com`)
 
-## Quick Start
-
-1. 設定ファイルを作成
+## Installation
 
 ```bash
-cp config.example.toml config.toml
+cargo install --git https://github.com/6uclz1/gh-watch gh-watch
+```
+
+## Quick Start
+
+1. 設定ファイルを生成
+
+```bash
+gh-watch init
 ```
 
 2. `config.toml` の `[[repositories]]` を自分の監視対象に編集
@@ -21,16 +27,21 @@ cp config.example.toml config.toml
 3. 事前チェック
 
 ```bash
-cargo run -- check --config ./config.toml
+gh-watch check
 ```
 
 4. 常駐監視 + TUI 起動
 
 ```bash
-cargo run -- watch --config ./config.toml
+gh-watch watch
 ```
 
-`--config` を省略した場合の既定パス:
+`--config` を省略した場合の探索順:
+- `./config.toml`
+- `GH_WATCH_CONFIG` 環境変数
+- 既定パス
+
+既定パス:
 - macOS/Linux: `~/.config/gh-watch/config.toml`
 - Windows: `%APPDATA%\\gh-watch\\config.toml`
 

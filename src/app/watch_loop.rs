@@ -14,6 +14,8 @@ use crate::{
     ui::tui::{handle_input, parse_input, parse_mouse_input, InputCommand, TerminalUi, TuiModel},
 };
 
+const SPINNER_REDRAW_INTERVAL_MS: u64 = 120;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopControl {
     Continue,
@@ -248,6 +250,10 @@ where
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_seconds));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut spinner_interval =
+        tokio::time::interval(Duration::from_millis(SPINNER_REDRAW_INTERVAL_MS));
+    spinner_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    spinner_interval.tick().await;
     let mut reader = crossterm::event::EventStream::new();
     let mut poll_state = PollExecutionState::default();
     let mut in_flight_poll: Option<PollFuture<'_>> = None;
@@ -270,6 +276,9 @@ where
                 if model.is_polling {
                     ui.draw(&mut model)?;
                 }
+            }
+            _ = spinner_interval.tick(), if model.is_polling => {
+                ui.draw(&mut model)?;
             }
             poll_result = async {
                 match in_flight_poll.as_mut() {

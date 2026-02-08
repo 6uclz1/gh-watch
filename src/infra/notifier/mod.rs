@@ -42,25 +42,37 @@ impl PlatformNotificationOptions {
     }
 
     fn startup_warnings(&self) -> Vec<String> {
-        let mut warnings = Vec::new();
-
         #[cfg(target_os = "macos")]
-        if macos::effective_bundle_id(self.macos_bundle_id.as_deref()) == macos::DEFAULT_BUNDLE_ID {
-            warnings.push(format!(
-                "notifications.macos_bundle_id is not set; using default {}",
-                macos::DEFAULT_BUNDLE_ID
-            ));
+        {
+            if macos::effective_bundle_id(self.macos_bundle_id.as_deref())
+                == macos::DEFAULT_BUNDLE_ID
+            {
+                vec![format!(
+                    "notifications.macos_bundle_id is not set; using default {}",
+                    macos::DEFAULT_BUNDLE_ID
+                )]
+            } else {
+                Vec::new()
+            }
         }
 
         #[cfg(target_os = "windows")]
-        if windows::effective_app_id(self.windows_app_id.as_deref()) == windows::DEFAULT_APP_ID {
-            warnings.push(
-                "notifications.windows_app_id is not set; using default PowerShell AppUserModelID"
-                    .to_string(),
-            );
+        {
+            if windows::effective_app_id(self.windows_app_id.as_deref()) == windows::DEFAULT_APP_ID
+            {
+                vec![
+                    "notifications.windows_app_id is not set; using default PowerShell AppUserModelID"
+                        .to_string(),
+                ]
+            } else {
+                Vec::new()
+            }
         }
 
-        warnings
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Vec::new()
+        }
     }
 }
 
@@ -234,11 +246,8 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
 
-    use super::{
-        build_notification_body, dispatch_notification, DesktopNotifier, PlatformNotifier,
-    };
+    use super::{build_notification_body, dispatch_notification, PlatformNotifier};
     use crate::{
-        config::NotificationConfig,
         domain::events::{EventKind, WatchEvent},
         ports::{NotificationClickSupport, NotificationDispatchResult},
     };
@@ -372,7 +381,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn startup_warnings_macos_warn_when_bundle_id_uses_default() {
-        let notifier = DesktopNotifier::default();
+        let notifier = super::DesktopNotifier::default();
         let warnings = notifier.startup_warnings();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("notifications.macos_bundle_id"));
@@ -381,18 +390,18 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn startup_warnings_macos_are_empty_when_bundle_id_configured() {
-        let cfg = NotificationConfig {
+        let cfg = crate::config::NotificationConfig {
             macos_bundle_id: Some("com.example.CustomMacApp".to_string()),
-            ..NotificationConfig::default()
+            ..crate::config::NotificationConfig::default()
         };
-        let notifier = DesktopNotifier::from_notification_config(&cfg);
+        let notifier = super::DesktopNotifier::from_notification_config(&cfg);
         assert!(notifier.startup_warnings().is_empty());
     }
 
     #[cfg(target_os = "windows")]
     #[test]
     fn startup_warnings_windows_warn_when_app_id_uses_default() {
-        let notifier = DesktopNotifier::default();
+        let notifier = super::DesktopNotifier::default();
         let warnings = notifier.startup_warnings();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("notifications.windows_app_id"));
@@ -401,11 +410,11 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn startup_warnings_windows_are_empty_when_app_id_configured() {
-        let cfg = NotificationConfig {
+        let cfg = crate::config::NotificationConfig {
             windows_app_id: Some("com.example.CustomWinApp".to_string()),
-            ..NotificationConfig::default()
+            ..crate::config::NotificationConfig::default()
         };
-        let notifier = DesktopNotifier::from_notification_config(&cfg);
+        let notifier = super::DesktopNotifier::from_notification_config(&cfg);
         assert!(notifier.startup_warnings().is_empty());
     }
 }

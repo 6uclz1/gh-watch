@@ -8,6 +8,10 @@ failure_history_limit = 200
 enabled = true
 include_url = true
 
+[poll]
+max_concurrency = 4
+timeout_seconds = 30
+
 [[repositories]]
 name = "owner/repo-one"
 enabled = true

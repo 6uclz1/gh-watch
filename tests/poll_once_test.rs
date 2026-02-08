@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
+use std::time::Duration as StdDuration;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use gh_watch::app::poll_once::poll_once;
-use gh_watch::config::{Config, NotificationConfig, RepositoryConfig};
+use gh_watch::config::{Config, NotificationConfig, PollConfig, RepositoryConfig};
 use gh_watch::domain::events::{EventKind, WatchEvent};
 use gh_watch::domain::failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL};
 use gh_watch::ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort};
@@ -14,6 +18,19 @@ use gh_watch::ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort};
 struct FakeGh {
     repos: Arc<Mutex<HashMap<String, Vec<WatchEvent>>>>,
     fail_repo: Arc<Mutex<Option<String>>>,
+    delays: Arc<Mutex<HashMap<String, StdDuration>>>,
+    in_flight: Arc<AtomicUsize>,
+    max_in_flight: Arc<AtomicUsize>,
+}
+
+impl FakeGh {
+    fn set_delay(&self, repo: &str, delay: StdDuration) {
+        self.delays.lock().unwrap().insert(repo.to_string(), delay);
+    }
+
+    fn max_concurrency_seen(&self) -> usize {
+        self.max_in_flight.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
@@ -27,7 +44,18 @@ impl GhClientPort for FakeGh {
         repo: &str,
         _since: chrono::DateTime<Utc>,
     ) -> Result<Vec<WatchEvent>> {
-        if self
+        let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+
+        let delay = {
+            let delays = self.delays.lock().unwrap();
+            delays.get(repo).copied()
+        };
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+
+        let result = if self
             .fail_repo
             .lock()
             .unwrap()
@@ -35,15 +63,19 @@ impl GhClientPort for FakeGh {
             .map(|r| r == repo)
             .unwrap_or(false)
         {
-            return Err(anyhow!("boom"));
-        }
-        Ok(self
+            Err(anyhow!("boom"))
+        } else {
+            Ok(self
             .repos
             .lock()
             .unwrap()
             .get(repo)
             .cloned()
             .unwrap_or_default())
+        };
+
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        result
     }
 }
 
@@ -183,6 +215,10 @@ fn cfg() -> Config {
         notifications: NotificationConfig {
             enabled: true,
             include_url: true,
+        },
+        poll: PollConfig {
+            max_concurrency: 4,
+            timeout_seconds: 30,
         },
     }
 }
@@ -398,4 +434,91 @@ async fn cursor_update_failure_has_repo_and_root_cause() {
     let msg = format!("{err:#}");
     assert!(msg.contains("failed to update cursor for acme/api"));
     assert!(msg.contains("cursor write failed for acme/api"));
+}
+
+#[tokio::test]
+async fn poll_once_limits_repo_concurrency_from_config() {
+    let gh = FakeGh::default();
+    let state = FakeState::default();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
+    };
+    let repo_names = [
+        "acme/repo-a",
+        "acme/repo-b",
+        "acme/repo-c",
+        "acme/repo-d",
+    ];
+
+    for repo in repo_names {
+        state
+            .set_cursor(repo, Utc.with_ymd_and_hms(2025, 1, 19, 0, 0, 0).unwrap())
+            .unwrap();
+        gh.set_delay(repo, StdDuration::from_millis(120));
+    }
+
+    let cfg = Config {
+        repositories: repo_names
+            .iter()
+            .map(|name| RepositoryConfig {
+                name: (*name).to_string(),
+                enabled: true,
+            })
+            .collect(),
+        poll: PollConfig {
+            max_concurrency: 2,
+            timeout_seconds: 30,
+        },
+        ..cfg()
+    };
+
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock).await.unwrap();
+
+    assert!(out.repo_errors.is_empty());
+    assert_eq!(gh.max_concurrency_seen(), 2);
+}
+
+#[tokio::test]
+async fn repo_timeout_records_failure_and_other_repo_still_completes() {
+    let gh = FakeGh::default();
+    gh.repos.lock().unwrap().insert(
+        "acme/web".to_string(),
+        vec![sample_event("acme/web", "ok-1")],
+    );
+    gh.set_delay("acme/api", StdDuration::from_millis(1200));
+
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 21, 0, 0, 0).unwrap(),
+    };
+    let cfg = Config {
+        poll: PollConfig {
+            max_concurrency: 2,
+            timeout_seconds: 1,
+        },
+        ..cfg()
+    };
+
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock).await.unwrap();
+
+    assert_eq!(out.notified_count, 1);
+    assert_eq!(out.repo_errors.len(), 1);
+    assert_eq!(out.failures.len(), 1);
+    assert_eq!(out.failures[0].kind, FAILURE_KIND_REPO_POLL);
+    assert_eq!(out.failures[0].repo, "acme/api");
+    assert!(out.repo_errors[0].contains("acme/api"));
 }

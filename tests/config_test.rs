@@ -34,6 +34,8 @@ name = "octocat/hello-world"
     assert!(cfg.repositories[0].enabled);
     assert!(cfg.notifications.enabled);
     assert!(cfg.notifications.include_url);
+    assert_eq!(cfg.poll.max_concurrency, 4);
+    assert_eq!(cfg.poll.timeout_seconds, 30);
 }
 
 #[test]
@@ -47,6 +49,34 @@ name = "octocat/hello-world"
 
     let err = parse_config(src).expect_err("zero limit should fail");
     assert!(err.to_string().contains("failure_history_limit"));
+}
+
+#[test]
+fn parse_config_rejects_zero_poll_max_concurrency() {
+    let src = r#"
+[poll]
+max_concurrency = 0
+
+[[repositories]]
+name = "octocat/hello-world"
+"#;
+
+    let err = parse_config(src).expect_err("zero max_concurrency should fail");
+    assert!(err.to_string().contains("poll.max_concurrency"));
+}
+
+#[test]
+fn parse_config_rejects_zero_poll_timeout_seconds() {
+    let src = r#"
+[poll]
+timeout_seconds = 0
+
+[[repositories]]
+name = "octocat/hello-world"
+"#;
+
+    let err = parse_config(src).expect_err("zero timeout_seconds should fail");
+    assert!(err.to_string().contains("poll.timeout_seconds"));
 }
 
 #[test]

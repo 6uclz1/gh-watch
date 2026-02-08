@@ -393,7 +393,7 @@ mod tests {
 
     use super::{enabled_repository_names, handle_stream_event, LoopControl, PollExecutionState};
     use crate::{
-        config::{Config, NotificationConfig, RepositoryConfig},
+        config::{Config, NotificationConfig, PollConfig, RepositoryConfig},
         domain::{
             events::{EventKind, WatchEvent},
             failure::FailureRecord,
@@ -572,6 +572,7 @@ mod tests {
                 },
             ],
             notifications: NotificationConfig::default(),
+            poll: PollConfig::default(),
         };
 
         let watched = enabled_repository_names(&config);

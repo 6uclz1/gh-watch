@@ -21,6 +21,8 @@ pub struct Config {
     pub repositories: Vec<RepositoryConfig>,
     #[serde(default)]
     pub notifications: NotificationConfig,
+    #[serde(default)]
+    pub poll: PollConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +49,23 @@ impl Default for NotificationConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PollConfig {
+    #[serde(default = "default_poll_max_concurrency")]
+    pub max_concurrency: usize,
+    #[serde(default = "default_poll_timeout_seconds")]
+    pub timeout_seconds: u64,
+}
+
+impl Default for PollConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrency: default_poll_max_concurrency(),
+            timeout_seconds: default_poll_timeout_seconds(),
+        }
+    }
+}
+
 fn default_interval_seconds() -> u64 {
     300
 }
@@ -65,6 +84,14 @@ fn default_failure_history_limit() -> usize {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_poll_max_concurrency() -> usize {
+    4
+}
+
+fn default_poll_timeout_seconds() -> u64 {
+    30
 }
 
 pub fn parse_config(src: &str) -> Result<Config> {
@@ -150,6 +177,14 @@ fn validate_config(cfg: &Config) -> Result<()> {
 
     if cfg.failure_history_limit == 0 {
         return Err(anyhow!("failure_history_limit must be >= 1"));
+    }
+
+    if cfg.poll.max_concurrency == 0 {
+        return Err(anyhow!("poll.max_concurrency must be >= 1"));
+    }
+
+    if cfg.poll.timeout_seconds == 0 {
+        return Err(anyhow!("poll.timeout_seconds must be >= 1"));
     }
 
     Ok(())

@@ -2,7 +2,7 @@ use std::fs;
 
 use chrono::{TimeZone, Utc};
 use gh_watch::app::poll_once::poll_once;
-use gh_watch::config::{Config, NotificationConfig, RepositoryConfig};
+use gh_watch::config::{Config, NotificationConfig, PollConfig, RepositoryConfig};
 use gh_watch::infra::gh_client::GhCliClient;
 use gh_watch::infra::notifier::NoopNotifier;
 use gh_watch::infra::state_sqlite::SqliteStateStore;
@@ -83,6 +83,10 @@ exit 1
         notifications: NotificationConfig {
             enabled: true,
             include_url: true,
+        },
+        poll: PollConfig {
+            max_concurrency: 4,
+            timeout_seconds: 30,
         },
     };
 

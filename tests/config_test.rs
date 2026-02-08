@@ -39,11 +39,37 @@ name = "octocat/hello-world"
     assert!(cfg.repositories[0].enabled);
     assert!(cfg.notifications.enabled);
     assert!(cfg.notifications.include_url);
+    assert!(cfg.notifications.macos_bundle_id.is_none());
+    assert!(cfg.notifications.windows_app_id.is_none());
     assert!(cfg.filters.event_kinds.is_empty());
     assert!(cfg.filters.ignore_actors.is_empty());
     assert!(!cfg.filters.only_involving_me);
     assert_eq!(cfg.poll.max_concurrency, 4);
     assert_eq!(cfg.poll.timeout_seconds, 30);
+}
+
+#[test]
+fn parse_config_parses_notification_platform_sender_ids() {
+    let src = r#"
+[notifications]
+enabled = true
+include_url = true
+macos_bundle_id = "com.example.CustomMacApp"
+windows_app_id = "com.example.CustomWinApp"
+
+[[repositories]]
+name = "octocat/hello-world"
+"#;
+
+    let cfg = parse_config(src).expect("config should parse");
+    assert_eq!(
+        cfg.notifications.macos_bundle_id.as_deref(),
+        Some("com.example.CustomMacApp")
+    );
+    assert_eq!(
+        cfg.notifications.windows_app_id.as_deref(),
+        Some("com.example.CustomWinApp")
+    );
 }
 
 #[test]

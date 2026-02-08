@@ -85,6 +85,8 @@ exit 1
         notifications: NotificationConfig {
             enabled: true,
             include_url: true,
+            macos_bundle_id: None,
+            windows_app_id: None,
         },
         filters: FiltersConfig::default(),
         poll: PollConfig {

@@ -247,7 +247,10 @@ async fn run_check_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Resu
         .await
         .context("GitHub authentication is invalid. Run `gh auth login -h github.com`.")?;
 
-    let notifier = DesktopNotifier;
+    let notifier = DesktopNotifier::from_notification_config(&cfg.notifications);
+    for warning in notifier.startup_warnings() {
+        eprintln!("notification backend warning: {warning}");
+    }
     notifier
         .check_health()
         .context("Notification backend check failed")?;
@@ -281,7 +284,10 @@ async fn run_watch_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Resu
     let state_path = resolve_state_db_path(&cfg)?;
     let state = SqliteStateStore::new(&state_path)?;
 
-    let notifier = DesktopNotifier;
+    let notifier = DesktopNotifier::from_notification_config(&cfg.notifications);
+    for warning in notifier.startup_warnings() {
+        eprintln!("notification backend warning: {warning}");
+    }
     if let Err(err) = notifier.check_health() {
         eprintln!("notification backend warning: {err}");
     }
@@ -383,7 +389,7 @@ async fn run_once_cmd(
     let state_path = resolve_state_db_path(&cfg)?;
     let state = SqliteStateStore::new(&state_path)?;
 
-    let notifier = DesktopNotifier;
+    let notifier = DesktopNotifier::from_notification_config(&cfg.notifications);
     if let Err(err) = notifier.check_health() {
         eprintln!("notification backend warning: {err}");
     }
@@ -480,7 +486,7 @@ async fn run_doctor_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Res
         .context("GitHub authentication is invalid. Run `gh auth login -h github.com`.")?;
     println!("gh auth: ok");
 
-    let notifier = DesktopNotifier;
+    let notifier = DesktopNotifier::from_notification_config(&cfg.notifications);
     match notifier.check_health() {
         Ok(()) => println!("notifier: ok"),
         Err(err) => println!("notifier: warning ({err})"),
@@ -935,6 +941,8 @@ fn render_config(
     out.push_str("[notifications]\n");
     out.push_str(&format!("enabled = {notifications_enabled}\n"));
     out.push_str(&format!("include_url = {include_url}\n"));
+    out.push_str("# macos_bundle_id = \"com.apple.Terminal\"\n");
+    out.push_str("# windows_app_id = \"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\"\n");
     out.push('\n');
     out.push_str("[poll]\n");
     out.push_str("max_concurrency = 4\n");

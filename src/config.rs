@@ -96,21 +96,12 @@ impl Default for NotificationConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct FiltersConfig {
     #[serde(default)]
     pub event_kinds: Vec<EventKind>,
     #[serde(default)]
     pub ignore_actors: Vec<String>,
-}
-
-impl Default for FiltersConfig {
-    fn default() -> Self {
-        Self {
-            event_kinds: Vec::new(),
-            ignore_actors: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -93,7 +93,17 @@ where
 {
     match maybe_event {
         Some(Ok(Event::Key(key))) => {
-            let cmd = parse_input(key);
+            let cmd = if model.search_mode {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => InputCommand::ClearSearchAndFilter,
+                    crossterm::event::KeyCode::Enter => InputCommand::FinishSearch,
+                    crossterm::event::KeyCode::Backspace => InputCommand::SearchBackspace,
+                    crossterm::event::KeyCode::Char(c) => InputCommand::SearchInput(c),
+                    _ => parse_input(key),
+                }
+            } else {
+                parse_input(key)
+            };
             match cmd {
                 InputCommand::Quit => LoopControl::Quit,
                 InputCommand::Refresh => LoopControl::RequestPoll,
@@ -117,6 +127,15 @@ where
                     LoopControl::Redraw
                 }
                 InputCommand::ToggleHelp => {
+                    handle_input(model, cmd);
+                    LoopControl::Redraw
+                }
+                InputCommand::StartSearch
+                | InputCommand::SearchInput(_)
+                | InputCommand::SearchBackspace
+                | InputCommand::FinishSearch
+                | InputCommand::CycleKindFilter
+                | InputCommand::ClearSearchAndFilter => {
                     handle_input(model, cmd);
                     LoopControl::Redraw
                 }
@@ -242,7 +261,7 @@ where
     let mut ui = TerminalUi::new()?;
     let mut model = TuiModel::new(config.timeline_limit);
     model.watched_repositories = enabled_repository_names(config);
-    model.timeline = state.load_timeline_events(config.timeline_limit)?;
+    model.replace_timeline(state.load_timeline_events(config.timeline_limit)?);
     model.latest_failure = state.latest_failure()?;
     model.status_line = "ready".to_string();
     model.next_poll_at = Some(clock.now());
@@ -393,7 +412,7 @@ mod tests {
 
     use super::{enabled_repository_names, handle_stream_event, LoopControl, PollExecutionState};
     use crate::{
-        config::{Config, NotificationConfig, RepositoryConfig},
+        config::{Config, FiltersConfig, NotificationConfig, PollConfig, RepositoryConfig},
         domain::{
             events::{EventKind, WatchEvent},
             failure::FailureRecord,
@@ -553,6 +572,7 @@ mod tests {
     fn enabled_repository_names_keeps_config_order_and_filters_disabled() {
         let config = Config {
             interval_seconds: 300,
+            bootstrap_lookback_hours: 24,
             timeline_limit: 500,
             retention_days: 90,
             failure_history_limit: 200,
@@ -561,17 +581,22 @@ mod tests {
                 RepositoryConfig {
                     name: "acme/one".to_string(),
                     enabled: true,
+                    event_kinds: None,
                 },
                 RepositoryConfig {
                     name: "acme/two".to_string(),
                     enabled: false,
+                    event_kinds: None,
                 },
                 RepositoryConfig {
                     name: "acme/three".to_string(),
                     enabled: true,
+                    event_kinds: None,
                 },
             ],
             notifications: NotificationConfig::default(),
+            filters: FiltersConfig::default(),
+            poll: PollConfig::default(),
         };
 
         let watched = enabled_repository_names(&config);

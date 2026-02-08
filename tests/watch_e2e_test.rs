@@ -2,7 +2,7 @@ use std::fs;
 
 use chrono::{TimeZone, Utc};
 use gh_watch::app::poll_once::poll_once;
-use gh_watch::config::{Config, NotificationConfig, RepositoryConfig};
+use gh_watch::config::{Config, FiltersConfig, NotificationConfig, PollConfig, RepositoryConfig};
 use gh_watch::infra::gh_client::GhCliClient;
 use gh_watch::infra::notifier::NoopNotifier;
 use gh_watch::infra::state_sqlite::SqliteStateStore;
@@ -72,6 +72,7 @@ exit 1
 
     let cfg = Config {
         interval_seconds: 300,
+        bootstrap_lookback_hours: 24,
         timeline_limit: 500,
         retention_days: 90,
         failure_history_limit: 200,
@@ -79,10 +80,16 @@ exit 1
         repositories: vec![RepositoryConfig {
             name: "acme/api".to_string(),
             enabled: true,
+            event_kinds: None,
         }],
         notifications: NotificationConfig {
             enabled: true,
             include_url: true,
+        },
+        filters: FiltersConfig::default(),
+        poll: PollConfig {
+            max_concurrency: 4,
+            timeout_seconds: 30,
         },
     };
 

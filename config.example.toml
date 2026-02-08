@@ -1,4 +1,5 @@
 interval_seconds = 300
+bootstrap_lookback_hours = 24
 timeline_limit = 500
 retention_days = 90
 failure_history_limit = 200
@@ -8,9 +9,18 @@ failure_history_limit = 200
 enabled = true
 include_url = true
 
+[filters]
+# event_kinds = ["pr_created", "issue_created", "issue_comment_created", "pr_review_comment_created"]
+# ignore_actors = ["dependabot[bot]"]
+
+[poll]
+max_concurrency = 4
+timeout_seconds = 30
+
 [[repositories]]
 name = "owner/repo-one"
 enabled = true
+# event_kinds = ["pr_created", "issue_created"]
 
 [[repositories]]
 name = "owner/repo-two"

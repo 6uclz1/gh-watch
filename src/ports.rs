@@ -27,9 +27,23 @@ pub trait StateStorePort: Send + Sync {
     ) -> Result<()>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationClickSupport {
+    Supported,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationDispatchResult {
+    Delivered,
+    DeliveredWithClickAction,
+    DeliveredWithBodyUrlFallback,
+}
+
 pub trait NotifierPort: Send + Sync {
     fn check_health(&self) -> Result<()>;
-    fn notify(&self, event: &WatchEvent, include_url: bool) -> Result<()>;
+    fn click_action_support(&self) -> NotificationClickSupport;
+    fn notify(&self, event: &WatchEvent, include_url: bool) -> Result<NotificationDispatchResult>;
 }
 
 pub trait ClockPort: Send + Sync {

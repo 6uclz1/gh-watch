@@ -2,7 +2,10 @@ name: Test and Coverage Report
 
 on:
   pull_request:
+  # Avoid duplicate CI runs on PR branches; keep push-triggered CI for main only.
   push:
+    branches:
+      - main
 
 permissions:
   contents: read

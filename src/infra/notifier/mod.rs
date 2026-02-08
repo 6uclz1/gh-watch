@@ -170,11 +170,14 @@ mod tests {
         ports::{NotificationClickSupport, NotificationDispatchResult},
     };
 
+    type NotificationCall = (String, String, Option<String>);
+    type NotificationCalls = Arc<Mutex<Vec<NotificationCall>>>;
+
     #[derive(Clone)]
     struct FakePlatform {
         support: NotificationClickSupport,
         fail_click_delivery: bool,
-        calls: Arc<Mutex<Vec<(String, String, Option<String>)>>>,
+        calls: NotificationCalls,
     }
 
     impl FakePlatform {

@@ -127,6 +127,14 @@ where
     }))
     .buffer_unordered(max_concurrency);
 
+    let processing_context = RepoEventProcessingContext {
+        config,
+        state,
+        notifier,
+        clock,
+        now,
+    };
+
     while let Some(fetch_result) = fetches.next().await {
         match fetch_result {
             RepoFetchResult::Fetched {
@@ -140,17 +148,15 @@ where
                     process_bootstrap_events(state, &mut outcome, repo_name.as_str(), events, now)?;
                 } else {
                     process_repo_events(
-                        config,
-                        state,
-                        notifier,
-                        clock,
+                        &processing_context,
                         &mut outcome,
-                        repo_name.as_str(),
-                        since,
-                        &allowed_event_kinds,
-                        &config.filters.ignore_actors,
-                        events,
-                        now,
+                        RepoEventBatch {
+                            repo_name: repo_name.as_str(),
+                            since,
+                            allowed_event_kinds: &allowed_event_kinds,
+                            ignore_actors: &config.filters.ignore_actors,
+                            events,
+                        },
                     )?;
                 }
             }
@@ -176,24 +182,39 @@ fn bootstrap_since(now: chrono::DateTime<Utc>, lookback_hours: u64) -> chrono::D
         .unwrap_or(now)
 }
 
-fn process_repo_events<S, N, K>(
-    config: &Config,
-    state: &S,
-    notifier: &N,
-    clock: &K,
-    outcome: &mut PollOutcome,
-    repo_name: &str,
-    since: chrono::DateTime<Utc>,
-    allowed_event_kinds: &[EventKind],
-    ignore_actors: &[String],
-    events: Vec<WatchEvent>,
+struct RepoEventProcessingContext<'a, S, N, K> {
+    config: &'a Config,
+    state: &'a S,
+    notifier: &'a N,
+    clock: &'a K,
     now: chrono::DateTime<Utc>,
+}
+
+struct RepoEventBatch<'a> {
+    repo_name: &'a str,
+    since: chrono::DateTime<Utc>,
+    allowed_event_kinds: &'a [EventKind],
+    ignore_actors: &'a [String],
+    events: Vec<WatchEvent>,
+}
+
+fn process_repo_events<S, N, K>(
+    context: &RepoEventProcessingContext<'_, S, N, K>,
+    outcome: &mut PollOutcome,
+    batch: RepoEventBatch<'_>,
 ) -> Result<()>
 where
     S: StateStorePort,
     N: NotifierPort,
     K: ClockPort,
 {
+    let RepoEventBatch {
+        repo_name,
+        since,
+        allowed_event_kinds,
+        ignore_actors,
+        events,
+    } = batch;
     let mut earliest_notification_failure_at: Option<chrono::DateTime<Utc>> = None;
 
     for event in events {
@@ -202,22 +223,25 @@ where
         }
 
         let event_key = event.event_key();
-        let already_notified = state.is_event_notified(&event_key)?;
+        let already_notified = context.state.is_event_notified(&event_key)?;
         if already_notified {
             continue;
         }
 
-        if config.notifications.enabled {
-            match notifier.notify(&event, config.notifications.include_url) {
+        if context.config.notifications.enabled {
+            match context
+                .notifier
+                .notify(&event, context.config.notifications.include_url)
+            {
                 Ok(_) => {}
                 Err(err) => {
                     let failure = FailureRecord::new(
                         FAILURE_KIND_NOTIFICATION,
                         event.repo.clone(),
-                        clock.now(),
+                        context.clock.now(),
                         format!("{}: {}", event.event_key(), err),
                     );
-                    state.record_failure(&failure).with_context(|| {
+                    context.state.record_failure(&failure).with_context(|| {
                         format!(
                             "failed to record notification failure for {}",
                             event.event_key()
@@ -240,8 +264,8 @@ where
             }
         }
 
-        state.record_notified_event(&event, now)?;
-        state.append_timeline_event(&event)?;
+        context.state.record_notified_event(&event, context.now)?;
+        context.state.append_timeline_event(&event)?;
         outcome.notified_count += 1;
         outcome.notified_events.push(event.clone());
         outcome.timeline_events.push(event);
@@ -253,10 +277,11 @@ where
             .checked_sub_signed(Duration::nanoseconds(1))
             .unwrap_or(since)
     } else {
-        now
+        context.now
     };
 
-    state
+    context
+        .state
         .set_cursor(repo_name, next_cursor)
         .with_context(|| format!("failed to update cursor for {repo_name}"))?;
 

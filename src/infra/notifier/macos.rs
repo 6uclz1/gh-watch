@@ -17,7 +17,10 @@ pub fn notify(title: &str, body: &str, click_url: Option<&str>) -> Result<()> {
         let url = url.to_string();
         std::thread::spawn(move || {
             let mut notification = mac_notification_sys::Notification::new();
-            notification.title(&title).message(&body).wait_for_click(true);
+            notification
+                .title(&title)
+                .message(&body)
+                .wait_for_click(true);
             if let Ok(mac_notification_sys::NotificationResponse::Click) = notification.send() {
                 let _ = std::process::Command::new("open").arg(url).status();
             }

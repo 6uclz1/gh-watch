@@ -213,8 +213,7 @@ impl TuiModel {
     }
 
     fn cycle_kind_filter(&mut self) {
-        let previous_selected_key = self
-            .snapshot_selected_key();
+        let previous_selected_key = self.snapshot_selected_key();
         self.kind_filter = match self.kind_filter {
             None => Some(TimelineKindFilter::PrCreated),
             Some(kind) => kind.next(),
@@ -657,7 +656,11 @@ fn build_filter_status_line(model: &TuiModel) -> String {
         .kind_filter
         .map(|kind| kind.label().to_string())
         .unwrap_or_else(|| "ALL".to_string());
-    let mode = if model.search_mode { "search" } else { "browse" };
+    let mode = if model.search_mode {
+        "search"
+    } else {
+        "browse"
+    };
     format!("filters: search={search} | kind={kind} | mode={mode}")
 }
 

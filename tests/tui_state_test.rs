@@ -337,7 +337,10 @@ fn selection_remains_valid_when_filters_change() {
     handle_input(&mut model, InputCommand::ClearSearchAndFilter);
     assert!(model.selected < model.timeline.len());
     let expected_key = model.timeline[model.selected].event_key();
-    assert_eq!(model.selected_event_key.as_deref(), Some(expected_key.as_str()));
+    assert_eq!(
+        model.selected_event_key.as_deref(),
+        Some(expected_key.as_str())
+    );
 }
 
 #[test]

@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     path::Path,
     sync::{Mutex, OnceLock},
 };
@@ -114,7 +113,10 @@ event_kinds = ["pr_created"]
 
     let cfg = parse_config(src).expect("config should parse");
     assert_eq!(cfg.filters.event_kinds.len(), 2);
-    assert_eq!(cfg.filters.ignore_actors, vec!["dependabot[bot]".to_string()]);
+    assert_eq!(
+        cfg.filters.ignore_actors,
+        vec!["dependabot[bot]".to_string()]
+    );
     assert_eq!(cfg.repositories.len(), 1);
     assert_eq!(
         cfg.repositories[0]
@@ -160,7 +162,11 @@ fn resolve_config_path_uses_gh_watch_config_env_before_other_candidates() {
     let env_config = dir.path().join("env-config.toml");
     let cwd = dir.path().join("cwd");
     fs::create_dir_all(&cwd).unwrap();
-    fs::write(cwd.join("config.toml"), "[[repositories]]\nname=\"acme/repo\"\n").unwrap();
+    fs::write(
+        cwd.join("config.toml"),
+        "[[repositories]]\nname=\"acme/repo\"\n",
+    )
+    .unwrap();
 
     with_current_dir(&cwd, || {
         env::set_var("GH_WATCH_CONFIG", &env_config);

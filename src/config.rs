@@ -1,6 +1,7 @@
 use std::{
-    env, fs,
+    env,
     fmt::{Display, Formatter},
+    fs,
     path::{Path, PathBuf},
 };
 

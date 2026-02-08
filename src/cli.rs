@@ -187,11 +187,7 @@ fn run_config_open_cmd() -> Result<()> {
 
 fn run_config_path_cmd() -> Result<()> {
     let resolved = resolve_config_path_with_source(None)?;
-    println!(
-        "{} (source: {})",
-        resolved.path.display(),
-        resolved.source
-    );
+    println!("{} (source: {})", resolved.path.display(), resolved.source);
     Ok(())
 }
 
@@ -228,8 +224,12 @@ fn run_config_doctor_cmd() -> Result<()> {
         return Ok(());
     }
 
-    let config_src = fs::read_to_string(&selected.path)
-        .with_context(|| format!("failed to read selected config: {}", selected.path.display()))?;
+    let config_src = fs::read_to_string(&selected.path).with_context(|| {
+        format!(
+            "failed to read selected config: {}",
+            selected.path.display()
+        )
+    })?;
     match parse_config(&config_src) {
         Ok(_) => println!("doctor: selected config parses successfully"),
         Err(err) => {
@@ -376,7 +376,8 @@ async fn run_init_interactive_cmd(path: PathBuf, force: bool) -> Result<()> {
         include_url,
     );
     parse_config(&config_src).context("generated config is invalid")?;
-    fs::write(&path, config_src).with_context(|| format!("failed to write config: {}", path.display()))?;
+    fs::write(&path, config_src)
+        .with_context(|| format!("failed to write config: {}", path.display()))?;
 
     println!("created config: {}", path.display());
     println!("next: run `gh-watch check --config {}`", path.display());
@@ -413,7 +414,9 @@ fn select_repositories(candidates: &[String]) -> Result<Vec<String>> {
         println!("  {}. {}", index + 1, repo);
     }
 
-    let raw = prompt_line("select repositories by number (comma-separated), or press Enter for manual input: ")?;
+    let raw = prompt_line(
+        "select repositories by number (comma-separated), or press Enter for manual input: ",
+    )?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return prompt_manual_repositories();

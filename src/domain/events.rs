@@ -52,8 +52,8 @@ pub fn event_matches_notification_filters(
     allowed_event_kinds: &[EventKind],
     ignore_actors: &[String],
 ) -> bool {
-    let kind_allowed =
-        allowed_event_kinds.is_empty() || allowed_event_kinds.iter().any(|kind| kind == &event.kind);
+    let kind_allowed = allowed_event_kinds.is_empty()
+        || allowed_event_kinds.iter().any(|kind| kind == &event.kind);
     if !kind_allowed {
         return false;
     }

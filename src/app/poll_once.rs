@@ -137,13 +137,7 @@ where
                 events,
             } => {
                 if is_bootstrap {
-                    process_bootstrap_events(
-                        state,
-                        &mut outcome,
-                        repo_name.as_str(),
-                        events,
-                        now,
-                    )?;
+                    process_bootstrap_events(state, &mut outcome, repo_name.as_str(), events, now)?;
                 } else {
                     process_repo_events(
                         config,

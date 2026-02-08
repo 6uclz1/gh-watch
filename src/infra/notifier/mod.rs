@@ -56,23 +56,25 @@ fn dispatch_notification<P: PlatformNotifier>(
     let body = build_notification_body(event, include_url);
 
     match platform.click_action_support() {
-        NotificationClickSupport::Supported => match platform.notify(&title, &body, Some(&event.url)) {
-            Ok(()) => Ok(NotificationDispatchResult::DeliveredWithClickAction),
-            Err(click_err) => {
-                platform
+        NotificationClickSupport::Supported => {
+            match platform.notify(&title, &body, Some(&event.url)) {
+                Ok(()) => Ok(NotificationDispatchResult::DeliveredWithClickAction),
+                Err(click_err) => {
+                    platform
                     .notify(&title, &body, None)
                     .map_err(|fallback_err| {
                         anyhow!(
                             "notification click-action failed: {click_err}; fallback delivery also failed: {fallback_err}"
                         )
                     })?;
-                if include_url {
-                    Ok(NotificationDispatchResult::DeliveredWithBodyUrlFallback)
-                } else {
-                    Ok(NotificationDispatchResult::Delivered)
+                    if include_url {
+                        Ok(NotificationDispatchResult::DeliveredWithBodyUrlFallback)
+                    } else {
+                        Ok(NotificationDispatchResult::Delivered)
+                    }
                 }
             }
-        },
+        }
         NotificationClickSupport::Unsupported => {
             platform.notify(&title, &body, None)?;
             if include_url {
@@ -227,7 +229,10 @@ mod tests {
 
         let dispatch = dispatch_notification(&platform, &event, false).unwrap();
 
-        assert_eq!(dispatch, NotificationDispatchResult::DeliveredWithClickAction);
+        assert_eq!(
+            dispatch,
+            NotificationDispatchResult::DeliveredWithClickAction
+        );
         let calls = platform.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].2.as_deref(), Some(event.url.as_str()));
@@ -241,7 +246,10 @@ mod tests {
 
         let dispatch = dispatch_notification(&platform, &event, true).unwrap();
 
-        assert_eq!(dispatch, NotificationDispatchResult::DeliveredWithBodyUrlFallback);
+        assert_eq!(
+            dispatch,
+            NotificationDispatchResult::DeliveredWithBodyUrlFallback
+        );
         let calls = platform.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].1.contains("https://example.com/pr/1"));
@@ -256,7 +264,10 @@ mod tests {
 
         let dispatch = dispatch_notification(&platform, &event, true).unwrap();
 
-        assert_eq!(dispatch, NotificationDispatchResult::DeliveredWithBodyUrlFallback);
+        assert_eq!(
+            dispatch,
+            NotificationDispatchResult::DeliveredWithBodyUrlFallback
+        );
         let calls = platform.calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].2.as_deref(), Some(event.url.as_str()));

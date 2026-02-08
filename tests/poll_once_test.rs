@@ -75,12 +75,12 @@ impl GhClientPort for FakeGh {
             Err(anyhow!("boom"))
         } else {
             Ok(self
-            .repos
-            .lock()
-            .unwrap()
-            .get(repo)
-            .cloned()
-            .unwrap_or_default())
+                .repos
+                .lock()
+                .unwrap()
+                .get(repo)
+                .cloned()
+                .unwrap_or_default())
         };
 
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -187,11 +187,7 @@ impl NotifierPort for FakeNotifier {
         NotificationClickSupport::Unsupported
     }
 
-    fn notify(
-        &self,
-        event: &WatchEvent,
-        _include_url: bool,
-    ) -> Result<NotificationDispatchResult> {
+    fn notify(&self, event: &WatchEvent, _include_url: bool) -> Result<NotificationDispatchResult> {
         let event_key = event.event_key();
         if self.fail_once.lock().unwrap().remove(&event_key) {
             return Err(anyhow!("notify failed once"));
@@ -324,7 +320,10 @@ async fn bootstrap_lookback_populates_timeline_without_notifications() {
 
     let mut fetched = gh.fetched_repos();
     fetched.sort();
-    assert_eq!(fetched, vec!["acme/api".to_string(), "acme/web".to_string()]);
+    assert_eq!(
+        fetched,
+        vec!["acme/api".to_string(), "acme/web".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -432,7 +431,9 @@ async fn global_event_kind_filter_skips_non_target_events() {
         ..cfg()
     };
 
-    let out = poll_once(&cfg, &gh, &state, &notifier, &clock).await.unwrap();
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock)
+        .await
+        .unwrap();
 
     assert_eq!(out.notified_count, 0);
     assert!(notifier.sent.lock().unwrap().is_empty());
@@ -476,7 +477,9 @@ async fn ignore_actors_filter_skips_matching_actor_notifications() {
         ..cfg()
     };
 
-    let out = poll_once(&cfg, &gh, &state, &notifier, &clock).await.unwrap();
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock)
+        .await
+        .unwrap();
 
     assert_eq!(out.notified_count, 0);
     assert!(notifier.sent.lock().unwrap().is_empty());
@@ -484,8 +487,10 @@ async fn ignore_actors_filter_skips_matching_actor_notifications() {
 
 #[tokio::test]
 async fn repository_event_kinds_override_global_filter() {
-    let api_event = sample_event_with_kind_actor("acme/api", "evt-api", EventKind::PrCreated, "alice");
-    let web_event = sample_event_with_kind_actor("acme/web", "evt-web", EventKind::PrCreated, "bob");
+    let api_event =
+        sample_event_with_kind_actor("acme/api", "evt-api", EventKind::PrCreated, "alice");
+    let web_event =
+        sample_event_with_kind_actor("acme/web", "evt-web", EventKind::PrCreated, "bob");
 
     let gh = FakeGh::default();
     gh.repos
@@ -534,10 +539,15 @@ async fn repository_event_kinds_override_global_filter() {
         ..cfg()
     };
 
-    let out = poll_once(&cfg, &gh, &state, &notifier, &clock).await.unwrap();
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock)
+        .await
+        .unwrap();
 
     assert_eq!(out.notified_count, 1);
-    assert_eq!(notifier.sent.lock().unwrap().as_slice(), &[api_event.event_key()]);
+    assert_eq!(
+        notifier.sent.lock().unwrap().as_slice(),
+        &[api_event.event_key()]
+    );
 }
 
 #[tokio::test]
@@ -687,12 +697,7 @@ async fn poll_once_limits_repo_concurrency_from_config() {
     let clock = FixedClock {
         now: Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
     };
-    let repo_names = [
-        "acme/repo-a",
-        "acme/repo-b",
-        "acme/repo-c",
-        "acme/repo-d",
-    ];
+    let repo_names = ["acme/repo-a", "acme/repo-b", "acme/repo-c", "acme/repo-d"];
 
     for repo in repo_names {
         state
@@ -717,7 +722,9 @@ async fn poll_once_limits_repo_concurrency_from_config() {
         ..cfg()
     };
 
-    let out = poll_once(&cfg, &gh, &state, &notifier, &clock).await.unwrap();
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock)
+        .await
+        .unwrap();
 
     assert!(out.repo_errors.is_empty());
     assert_eq!(gh.max_concurrency_seen(), 2);
@@ -757,7 +764,9 @@ async fn repo_timeout_records_failure_and_other_repo_still_completes() {
         ..cfg()
     };
 
-    let out = poll_once(&cfg, &gh, &state, &notifier, &clock).await.unwrap();
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock)
+        .await
+        .unwrap();
 
     assert_eq!(out.notified_count, 1);
     assert_eq!(out.repo_errors.len(), 1);

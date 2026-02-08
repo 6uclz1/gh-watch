@@ -623,6 +623,9 @@ mod tests {
             url: "https://example.com/ev1".to_string(),
             created_at: clock.now,
             source_item_id: "ev1".to_string(),
+            subject_author: Some("dev".to_string()),
+            requested_reviewer: None,
+            mentions: Vec::new(),
         }];
         model.selected = 0;
 
@@ -658,6 +661,9 @@ mod tests {
             url: "https://example.com/ev2".to_string(),
             created_at: clock.now,
             source_item_id: "ev2".to_string(),
+            subject_author: Some("dev".to_string()),
+            requested_reviewer: None,
+            mentions: Vec::new(),
         }];
         model.selected = 0;
 
@@ -768,6 +774,9 @@ mod tests {
                 url: "https://example.com/ev1".to_string(),
                 created_at: clock.now,
                 source_item_id: "ev1".to_string(),
+                subject_author: Some("dev".to_string()),
+                requested_reviewer: None,
+                mentions: Vec::new(),
             },
             WatchEvent {
                 event_id: "ev2".to_string(),
@@ -778,6 +787,9 @@ mod tests {
                 url: "https://example.com/ev2".to_string(),
                 created_at: clock.now,
                 source_item_id: "ev2".to_string(),
+                subject_author: Some("dev".to_string()),
+                requested_reviewer: None,
+                mentions: Vec::new(),
             },
             WatchEvent {
                 event_id: "ev3".to_string(),
@@ -788,6 +800,9 @@ mod tests {
                 url: "https://example.com/ev3".to_string(),
                 created_at: clock.now,
                 source_item_id: "ev3".to_string(),
+                subject_author: Some("dev".to_string()),
+                requested_reviewer: None,
+                mentions: Vec::new(),
             },
         ];
 

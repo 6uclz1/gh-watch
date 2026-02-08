@@ -4,7 +4,7 @@ use super::events::WatchEvent;
 
 #[derive(Debug, Clone)]
 pub enum NotificationDecision {
-    Notify(WatchEvent),
+    Notify(Box<WatchEvent>),
     SkipAlreadyNotified,
     SkipBootstrap,
 }
@@ -19,7 +19,7 @@ pub fn decide_notification(
     } else if already_notified.contains(&event.event_key()) {
         NotificationDecision::SkipAlreadyNotified
     } else {
-        NotificationDecision::Notify(event.clone())
+        NotificationDecision::Notify(Box::new(event.clone()))
     }
 }
 

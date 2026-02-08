@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 pub const FAILURE_KIND_REPO_POLL: &str = "repo_poll";
 pub const FAILURE_KIND_NOTIFICATION: &str = "notification";
 pub const FAILURE_KIND_POLL_LOOP: &str = "poll_loop";
 pub const FAILURE_KIND_INPUT_STREAM: &str = "input_stream";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureRecord {
     pub kind: String,
     pub repo: String,

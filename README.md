@@ -1,104 +1,161 @@
 # gh-watch
 
-GitHub の PR / Issue / コメントを定期監視し、重複なしでデスクトップ通知する常駐 CLI + TUI ツールです。
+Reliable GitHub watcher with desktop notifications and a terminal timeline UI.
+
+`gh-watch` runs locally, polls your repositories, deduplicates events, and helps you track important updates without opening GitHub all day.
+
+日本語README: [README_ja.md](README_ja.md)
+
+## What You Get In 5 Minutes
+
+1. Watch multiple repositories from one config.
+2. Get notifications for PRs/issues/comments and review/merge events.
+3. Avoid duplicate alerts across restarts with SQLite-backed event keys.
+4. Keep resilience: failed notifications are retried (at-least-once behavior).
+
+## Demo
+
+- Demo assets are prepared for the next release cut:
+- 30-45 sec GIF walkthrough
+- Timeline screenshot
+- Filter/search screenshot
 
 ## Prerequisites
 
 - Rust 1.93+
 - `gh` CLI
-- GitHub 認証済みの `gh` (`gh auth login -h github.com`)
+- Authenticated GitHub CLI:
+
+```bash
+gh auth login -h github.com
+```
 
 ## Installation
+
+### Cargo (current)
 
 ```bash
 cargo install --git https://github.com/6uclz1/gh-watch gh-watch
 ```
 
+### GitHub Releases
+
+Prebuilt binaries are published for macOS/Linux/Windows on every tag release.
+
 ## Quick Start
 
-1. 設定ファイルを生成
+1. Create config
 
 ```bash
 gh-watch init
 ```
 
-既存 `state.db` を初期化したい場合:
-
-```bash
-gh-watch init --reset-state
-# 明示 config を使う場合
-gh-watch init --reset-state --path ./config.toml
-```
-
-2. 設定ファイルをエディタで開く（`edit` は `open` の別名）
+2. Open config
 
 ```bash
 gh-watch config open
-# または
-gh-watch config edit
 ```
 
-3. `config.toml` の `[[repositories]]` を自分の監視対象に編集
+3. Edit repositories in `[[repositories]]`
 
-4. 事前チェック
+4. Validate setup
 
 ```bash
 gh-watch check
 ```
 
-5. 常駐監視 + TUI 起動
+5. Start watcher + TUI
 
 ```bash
 gh-watch watch
 ```
 
-設定ファイルの既定位置:
-- 実行中 `gh-watch` バイナリと同じディレクトリの `config.toml`
+## Core Commands
 
-確認コマンド:
+- `gh-watch watch [--config <path>] [--interval-seconds <n>]`
+- `gh-watch once [--config <path>] [--dry-run] [--json]`
+- `gh-watch report [--config <path>] [--since <duration>] [--format markdown|json]`
+- `gh-watch doctor [--config <path>]`
+- `gh-watch check [--config <path>]`
+- `gh-watch init [--path <path>] [--force] [--interactive] [--reset-state]`
+- `gh-watch config open|edit`
+- `gh-watch config path`
+- `gh-watch config doctor`
 
-```bash
-gh-watch config path
-```
+### `once` Exit Codes
 
-`watch` / `check` で `--config` を指定した場合のみ、明示パスを優先します。
+- `0`: success
+- `2`: partial failure (one or more repositories failed)
+- `1`: fatal failure
 
-## Key Bindings
+## Events
 
-- `q`: 終了
-- `r`: 手動更新
-- `?`: ヘルプ表示の ON/OFF
-- `↑` / `↓` または `j` / `k`: タイムラインを1件移動
-- `PageUp` / `PageDown`: タイムラインを1ページ移動
-- `g` / `Home`: 先頭へ移動
-- `G` / `End`: 末尾へ移動
-- `Enter`: 選択中タイムライン項目の URL を既定ブラウザで開く
-- マウス:
-  - 左クリック（タイムライン左ペイン内）: 項目選択
-  - ホイール上下（タイムライン左ペイン内）: 項目移動
-- 右ペイン（`Watching Repositories`）は閲覧専用
+Default supported event kinds:
 
-## Behavior
+- `pr_created`
+- `issue_created`
+- `issue_comment_created`
+- `pr_review_comment_created`
+- `pr_review_requested`
+- `pr_review_submitted`
+- `pr_merged`
 
-- 初回起動時は通知せず、カーソルのみ初期化
-- 通知済みイベントは SQLite で管理し、同一イベントの再通知を防止
-- 通知失敗時はカーソルを安全点まで巻き戻し、未通知イベントを次回ポーリングで再試行（at-least-once）
-- 監視/通知失敗は SQLite に永続化し、TUI の `latest_failure` で直近失敗を表示
-- 失敗履歴は `retention_days` と `failure_history_limit`（既定: 200件）で自動整理
-- 既定 state DB パス:
-  - macOS/Linux: `~/.local/share/gh-watch/state.db`
-  - Windows: `%LOCALAPPDATA%\\gh-watch\\state.db`
+## Filters
 
-## TUI Layout
+Global filter keys:
 
-- Header: `status` / `last_success` / `next_poll` / `failures` / `latest_failure`
-- Main(左 70%): `Timeline`（新着順、`↑`/`↓`で選択）
-- Main(右 30%): `Watching Repositories`（`enabled=true` の repository 一覧、config 記載順）
-- Selected: 選択イベントの要約 + URL
-- Footer: キーガイド（固定表示）
-- Overlay: `?` でヘルプ表示
+- `[filters].event_kinds`
+- `[filters].ignore_actors`
+- `[filters].only_involving_me`
 
-## Repository Notes
+`only_involving_me = true` keeps notifications when any of these are true:
 
-- `config.toml` はローカル環境用のため Git 管理対象外（`.gitignore` で除外）
-- 共有用のテンプレートは `config.example.toml`
+- Review request targets you.
+- Comment/review body mentions you.
+- Update happens on a PR/Issue authored by you.
+
+## At-Least-Once Notification Semantics
+
+- First run bootstraps cursor and does not notify.
+- Notifications are deduplicated by `event_key`.
+- If notification delivery fails, cursor is rolled back to retry missed events.
+- Repository-level failures do not block other repositories.
+
+## TUI Key Bindings
+
+- `q`: quit
+- `r`: refresh now
+- `/`: start search
+- `f`: cycle kind filter
+- `Esc`: clear search/filter
+- `?`: toggle help
+- `Enter`: open selected URL
+- `↑` / `↓` or `j` / `k`: move one item
+- `PageUp` / `PageDown`: move one page
+- `g` / `Home`: top
+- `G` / `End`: bottom
+- Mouse click/wheel in timeline: select/scroll
+
+## Configuration Notes
+
+Default config resolution order:
+
+1. `--config <path>`
+2. `GH_WATCH_CONFIG`
+3. `./config.toml`
+4. installed binary directory `config.toml`
+
+Default state DB path:
+
+- macOS/Linux: `~/.local/share/gh-watch/state.db`
+- Windows: `%LOCALAPPDATA%\gh-watch\state.db`
+
+Use `config.example.toml` as a shareable template.
+
+## Developer Quality Gates
+
+CI checks:
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`

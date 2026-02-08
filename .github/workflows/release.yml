@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_name: linux
+          - os: macos-latest
+            target_name: macos
+          - os: windows-latest
+            target_name: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package binary and docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          TARGET="${{ matrix.target_name }}"
+          DIST_DIR="dist"
+          mkdir -p "$DIST_DIR"
+
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            BIN="target/release/gh-watch.exe"
+            ARCHIVE="gh-watch-${VERSION}-${TARGET}.zip"
+            cp "$BIN" "$DIST_DIR/gh-watch.exe"
+            cp README.md "$DIST_DIR/README.md"
+            cp README_ja.md "$DIST_DIR/README_ja.md"
+            cp config.example.toml "$DIST_DIR/config.example.toml"
+            (
+              cd "$DIST_DIR"
+              7z a -tzip "../${ARCHIVE}" gh-watch.exe README.md README_ja.md config.example.toml > /dev/null
+            )
+          else
+            BIN="target/release/gh-watch"
+            ARCHIVE="gh-watch-${VERSION}-${TARGET}.tar.gz"
+            cp "$BIN" "$DIST_DIR/gh-watch"
+            cp README.md "$DIST_DIR/README.md"
+            cp README_ja.md "$DIST_DIR/README_ja.md"
+            cp config.example.toml "$DIST_DIR/config.example.toml"
+            tar -C "$DIST_DIR" -czf "$ARCHIVE" gh-watch README.md README_ja.md config.example.toml
+          fi
+
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target_name }}
+          path: |
+            gh-watch-*.tar.gz
+            gh-watch-*.tar.gz.sha256
+            gh-watch-*.zip
+            gh-watch-*.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.tar.gz.sha256
+            dist/**/*.zip
+            dist/**/*.zip.sha256

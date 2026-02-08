@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs,
     io::{self, Write},
@@ -7,18 +8,18 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use chrono::Utc;
-use clap::{Parser, Subcommand};
-use serde::Deserialize;
+use chrono::{DateTime, Duration, Utc};
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    app::watch_loop::run_watch,
+    app::{poll_once::poll_once, watch_loop::run_watch},
     config::{
         default_state_db_path, installed_config_path, load_config_with_path, parse_config,
         resolution_candidates, resolve_config_path_with_source, Config, ResolvedConfigPath,
     },
     infra::{gh_client::GhCliClient, notifier::DesktopNotifier, state_sqlite::SqliteStateStore},
-    ports::{ClockPort, GhClientPort, NotifierPort},
+    ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
 };
 
 #[derive(Debug, Parser)]
@@ -40,6 +41,26 @@ enum Commands {
         interval_seconds: Option<u64>,
     },
     Check {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Once {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Report {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, default_value = "24h")]
+        since: String,
+        #[arg(long, value_enum, default_value_t = ReportFormatArg::Markdown)]
+        format: ReportFormatArg,
+    },
+    Doctor {
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -67,12 +88,37 @@ enum ConfigCommands {
     Doctor,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum ReportFormatArg {
+    Markdown,
+    Json,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SystemClock;
 
 impl ClockPort for SystemClock {
     fn now(&self) -> chrono::DateTime<Utc> {
         Utc::now()
+    }
+}
+
+#[derive(Debug)]
+pub struct OncePartialFailure;
+
+impl std::fmt::Display for OncePartialFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("one or more repositories failed during once run")
+    }
+}
+
+impl std::error::Error for OncePartialFailure {}
+
+pub fn exit_code_for_error(err: &anyhow::Error) -> i32 {
+    if err.downcast_ref::<OncePartialFailure>().is_some() {
+        2
+    } else {
+        1
     }
 }
 
@@ -94,6 +140,26 @@ pub async fn run() -> Result<()> {
         Commands::Check { config } => {
             let loaded = load_config_with_path(config.as_deref())?;
             run_check_cmd(loaded.config, loaded.resolved_path).await
+        }
+        Commands::Once {
+            config,
+            dry_run,
+            json,
+        } => {
+            let loaded = load_config_with_path(config.as_deref())?;
+            run_once_cmd(loaded.config, loaded.resolved_path, dry_run, json).await
+        }
+        Commands::Report {
+            config,
+            since,
+            format,
+        } => {
+            let loaded = load_config_with_path(config.as_deref())?;
+            run_report_cmd(loaded.config, loaded.resolved_path, &since, format).await
+        }
+        Commands::Doctor { config } => {
+            let loaded = load_config_with_path(config.as_deref())?;
+            run_doctor_cmd(loaded.config, loaded.resolved_path).await
         }
         Commands::Init {
             path,
@@ -221,6 +287,273 @@ async fn run_watch_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Resu
     }
 
     run_watch(&cfg, &gh, &state, &notifier, &SystemClock).await
+}
+
+struct DryRunStateStore<'a, S> {
+    inner: &'a S,
+}
+
+impl<'a, S> DryRunStateStore<'a, S> {
+    fn new(inner: &'a S) -> Self {
+        Self { inner }
+    }
+}
+
+impl<S> StateStorePort for DryRunStateStore<'_, S>
+where
+    S: StateStorePort,
+{
+    fn get_cursor(&self, repo: &str) -> Result<Option<DateTime<Utc>>> {
+        self.inner.get_cursor(repo)
+    }
+
+    fn set_cursor(&self, _repo: &str, _at: DateTime<Utc>) -> Result<()> {
+        Ok(())
+    }
+
+    fn is_event_notified(&self, event_key: &str) -> Result<bool> {
+        self.inner.is_event_notified(event_key)
+    }
+
+    fn record_notified_event(
+        &self,
+        _event: &crate::domain::events::WatchEvent,
+        _notified_at: DateTime<Utc>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn record_failure(&self, _failure: &crate::domain::failure::FailureRecord) -> Result<()> {
+        Ok(())
+    }
+
+    fn latest_failure(&self) -> Result<Option<crate::domain::failure::FailureRecord>> {
+        self.inner.latest_failure()
+    }
+
+    fn append_timeline_event(&self, _event: &crate::domain::events::WatchEvent) -> Result<()> {
+        Ok(())
+    }
+
+    fn load_timeline_events(&self, limit: usize) -> Result<Vec<crate::domain::events::WatchEvent>> {
+        self.inner.load_timeline_events(limit)
+    }
+
+    fn cleanup_old(
+        &self,
+        _retention_days: u32,
+        _failure_history_limit: usize,
+        _now: DateTime<Utc>,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ReportOutput {
+    generated_at: DateTime<Utc>,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    events_total: usize,
+    failures_total: usize,
+    events_by_kind: BTreeMap<String, usize>,
+    events_by_repo: BTreeMap<String, usize>,
+    recent_failures: Vec<crate::domain::failure::FailureRecord>,
+}
+
+async fn run_once_cmd(
+    cfg: Config,
+    resolved_config: ResolvedConfigPath,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    let gh = GhCliClient::default();
+    gh.check_auth()
+        .await
+        .context("GitHub authentication is invalid. Run `gh auth login -h github.com`.")?;
+
+    let state_path = resolve_state_db_path(&cfg)?;
+    let state = SqliteStateStore::new(&state_path)?;
+
+    let notifier = DesktopNotifier;
+    if let Err(err) = notifier.check_health() {
+        eprintln!("notification backend warning: {err}");
+    }
+
+    let outcome = if dry_run {
+        let dry_run_state = DryRunStateStore::new(&state);
+        poll_once(&cfg, &gh, &dry_run_state, &notifier, &SystemClock).await?
+    } else {
+        poll_once(&cfg, &gh, &state, &notifier, &SystemClock).await?
+    };
+
+    if json {
+        println!("{}", serde_json::to_string(&outcome)?);
+    } else {
+        println!(
+            "config: {} (source: {})",
+            resolved_config.path.display(),
+            resolved_config.source
+        );
+        println!("notified: {}", outcome.notified_count);
+        println!("bootstrap_repos: {}", outcome.bootstrap_repos);
+        println!("repo_errors: {}", outcome.repo_errors.len());
+        if dry_run {
+            println!("mode: dry-run (state unchanged)");
+        }
+        for repo_error in &outcome.repo_errors {
+            println!("- {repo_error}");
+        }
+    }
+
+    if outcome.repo_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::Error::new(OncePartialFailure))
+    }
+}
+
+async fn run_report_cmd(
+    cfg: Config,
+    _resolved_config: ResolvedConfigPath,
+    since_raw: &str,
+    format: ReportFormatArg,
+) -> Result<()> {
+    let window = parse_since_duration(since_raw)?;
+    let now = Utc::now();
+    let start = now
+        .checked_sub_signed(window)
+        .ok_or_else(|| anyhow!("failed to resolve report time window"))?;
+
+    let state_path = resolve_state_db_path(&cfg)?;
+    let state = SqliteStateStore::new(&state_path)?;
+    let events = state.load_timeline_events_since(start, 5000)?;
+    let failures = state.load_failures_since(start, 5000)?;
+
+    let mut events_by_kind = BTreeMap::new();
+    let mut events_by_repo = BTreeMap::new();
+    for event in &events {
+        *events_by_kind
+            .entry(event.kind.as_str().to_string())
+            .or_insert(0) += 1;
+        *events_by_repo.entry(event.repo.clone()).or_insert(0) += 1;
+    }
+
+    let report = ReportOutput {
+        generated_at: now,
+        window_start: start,
+        window_end: now,
+        events_total: events.len(),
+        failures_total: failures.len(),
+        events_by_kind,
+        events_by_repo,
+        recent_failures: failures.into_iter().take(10).collect(),
+    };
+
+    match format {
+        ReportFormatArg::Json => println!("{}", serde_json::to_string(&report)?),
+        ReportFormatArg::Markdown => print_markdown_report(&report),
+    }
+
+    Ok(())
+}
+
+async fn run_doctor_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Result<()> {
+    println!(
+        "config: {} (source: {})",
+        resolved_config.path.display(),
+        resolved_config.source
+    );
+    println!("config doctor: ok");
+
+    let gh = GhCliClient::default();
+    gh.check_auth()
+        .await
+        .context("GitHub authentication is invalid. Run `gh auth login -h github.com`.")?;
+    println!("gh auth: ok");
+
+    let notifier = DesktopNotifier;
+    match notifier.check_health() {
+        Ok(()) => println!("notifier: ok"),
+        Err(err) => println!("notifier: warning ({err})"),
+    }
+
+    let state_path = resolve_state_db_path(&cfg)?;
+    let _store = SqliteStateStore::new(&state_path)?;
+    println!("state db: {}", state_path.display());
+
+    Ok(())
+}
+
+fn parse_since_duration(raw: &str) -> Result<Duration> {
+    if raw.len() < 2 {
+        return Err(anyhow!(
+            "invalid --since value '{raw}'; expected '<number><s|m|h|d>'"
+        ));
+    }
+
+    let (value, unit) = raw.split_at(raw.len() - 1);
+    let amount: i64 = value
+        .parse()
+        .with_context(|| format!("invalid --since amount in '{raw}'"))?;
+    if amount <= 0 {
+        return Err(anyhow!("--since must be > 0"));
+    }
+
+    let duration = match unit {
+        "s" => Duration::seconds(amount),
+        "m" => Duration::minutes(amount),
+        "h" => Duration::hours(amount),
+        "d" => Duration::days(amount),
+        _ => {
+            return Err(anyhow!(
+                "invalid --since unit in '{raw}'; expected one of s,m,h,d"
+            ));
+        }
+    };
+
+    Ok(duration)
+}
+
+fn print_markdown_report(report: &ReportOutput) {
+    println!("# gh-watch report");
+    println!("window_start: {}", report.window_start.to_rfc3339());
+    println!("window_end: {}", report.window_end.to_rfc3339());
+    println!("events_total: {}", report.events_total);
+    println!("failures_total: {}", report.failures_total);
+    println!();
+    println!("## events_by_kind");
+    if report.events_by_kind.is_empty() {
+        println!("- (none)");
+    } else {
+        for (kind, count) in &report.events_by_kind {
+            println!("- {kind}: {count}");
+        }
+    }
+    println!();
+    println!("## events_by_repo");
+    if report.events_by_repo.is_empty() {
+        println!("- (none)");
+    } else {
+        for (repo, count) in &report.events_by_repo {
+            println!("- {repo}: {count}");
+        }
+    }
+    println!();
+    println!("## recent_failures");
+    if report.recent_failures.is_empty() {
+        println!("- (none)");
+    } else {
+        for failure in &report.recent_failures {
+            println!(
+                "- {} [{}:{}] {}",
+                failure.failed_at.to_rfc3339(),
+                failure.kind,
+                failure.repo,
+                failure.message
+            );
+        }
+    }
 }
 
 fn resolve_state_db_path(cfg: &Config) -> Result<PathBuf> {
@@ -411,16 +744,16 @@ async fn run_init_interactive_cmd(path: PathBuf, force: bool) -> Result<()> {
         .await
         .context("GitHub authentication is invalid. Run `gh auth login -h github.com`.")?;
 
-    println!("auth: ok");
+    println!("auth: ok / 認証OK");
     let repositories = match fetch_repo_candidates() {
         Ok(candidates) if !candidates.is_empty() => select_repositories(&candidates)?,
         Ok(_) => {
-            println!("repo candidates were empty, falling back to manual input");
+            println!("repo candidates were empty, falling back to manual input / 候補が空のため手入力に切り替えます");
             prompt_manual_repositories()?
         }
         Err(err) => {
             println!("failed to fetch repo candidates: {err}");
-            println!("falling back to manual input");
+            println!("falling back to manual input / 手入力に切り替えます");
             prompt_manual_repositories()?
         }
     };
@@ -429,7 +762,7 @@ async fn run_init_interactive_cmd(path: PathBuf, force: bool) -> Result<()> {
     let notifications_enabled = prompt_bool("notifications.enabled", true)?;
     let include_url = prompt_bool("notifications.include_url", true)?;
 
-    println!("config path: {}", path.display());
+    println!("config path: {} / 設定ファイルパス", path.display());
     let should_write = prompt_bool("write config now", true)?;
     if !should_write {
         return Err(anyhow!("init aborted by user"));
@@ -445,8 +778,14 @@ async fn run_init_interactive_cmd(path: PathBuf, force: bool) -> Result<()> {
     fs::write(&path, config_src)
         .with_context(|| format!("failed to write config: {}", path.display()))?;
 
-    println!("created config: {}", path.display());
-    println!("next: run `gh-watch check --config {}`", path.display());
+    println!(
+        "created config: {} / 設定ファイルを作成しました",
+        path.display()
+    );
+    println!(
+        "next: run `gh-watch check --config {}` / 次に動作確認してください",
+        path.display()
+    );
     Ok(())
 }
 
@@ -515,7 +854,9 @@ fn select_repositories(candidates: &[String]) -> Result<Vec<String>> {
 }
 
 fn prompt_manual_repositories() -> Result<Vec<String>> {
-    let raw = prompt_line("enter repositories (owner/repo, comma-separated): ")?;
+    let raw = prompt_line(
+        "enter repositories (owner/repo, comma-separated) / 監視対象を入力 (owner/repo, カンマ区切り): ",
+    )?;
     let repos = raw
         .split(',')
         .map(str::trim)

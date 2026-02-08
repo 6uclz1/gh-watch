@@ -41,6 +41,7 @@ name = "octocat/hello-world"
     assert!(cfg.notifications.include_url);
     assert!(cfg.filters.event_kinds.is_empty());
     assert!(cfg.filters.ignore_actors.is_empty());
+    assert!(!cfg.filters.only_involving_me);
     assert_eq!(cfg.poll.max_concurrency, 4);
     assert_eq!(cfg.poll.timeout_seconds, 30);
 }
@@ -105,6 +106,7 @@ fn parse_config_parses_global_filters_and_repo_override_event_kinds() {
 [filters]
 event_kinds = ["pr_created", "issue_created"]
 ignore_actors = ["dependabot[bot]"]
+only_involving_me = true
 
 [[repositories]]
 name = "octocat/hello-world"
@@ -117,6 +119,7 @@ event_kinds = ["pr_created"]
         cfg.filters.ignore_actors,
         vec!["dependabot[bot]".to_string()]
     );
+    assert!(cfg.filters.only_involving_me);
     assert_eq!(cfg.repositories.len(), 1);
     assert_eq!(
         cfg.repositories[0]

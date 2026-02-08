@@ -22,6 +22,14 @@ cargo install --git https://github.com/6uclz1/gh-watch gh-watch
 gh-watch init
 ```
 
+既存 `state.db` を初期化したい場合:
+
+```bash
+gh-watch init --reset-state
+# 明示 config を使う場合
+gh-watch init --reset-state --path ./config.toml
+```
+
 2. 設定ファイルをエディタで開く（`edit` は `open` の別名）
 
 ```bash

@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -50,6 +50,8 @@ enum Commands {
         force: bool,
         #[arg(long)]
         interactive: bool,
+        #[arg(long)]
+        reset_state: bool,
     },
     Config {
         #[command(subcommand)]
@@ -97,16 +99,80 @@ pub async fn run() -> Result<()> {
             path,
             force,
             interactive,
+            reset_state,
         } => {
-            let path = path.unwrap_or(installed_config_path()?);
-            if interactive {
-                run_init_interactive_cmd(path, force).await
+            if reset_state {
+                run_init_reset_state_cmd(path, interactive)
             } else {
-                run_init_cmd(path, force)
+                let path = path.unwrap_or(installed_config_path()?);
+                if interactive {
+                    run_init_interactive_cmd(path, force).await
+                } else {
+                    run_init_cmd(path, force)
+                }
             }
         }
         Commands::Config { command } => run_config_cmd(command),
     }
+}
+
+fn run_init_reset_state_cmd(config_path: Option<PathBuf>, interactive: bool) -> Result<()> {
+    if interactive {
+        return Err(anyhow!("--reset-state cannot be used with --interactive"));
+    }
+
+    let state_db_path = resolve_state_db_path_for_reset(config_path.as_deref())?;
+    remove_state_db_files(&state_db_path)?;
+    let _store = SqliteStateStore::new(&state_db_path)?;
+
+    println!("reset state db: {}", state_db_path.display());
+    println!("state db initialized");
+    Ok(())
+}
+
+fn resolve_state_db_path_for_reset(config_path: Option<&Path>) -> Result<PathBuf> {
+    let resolved = resolve_config_path_with_source(config_path)?;
+    if !resolved.path.exists() {
+        return default_state_db_path();
+    }
+
+    let src = fs::read_to_string(&resolved.path).with_context(|| {
+        format!(
+            "failed to read config for --reset-state: {}",
+            resolved.path.display()
+        )
+    })?;
+    let cfg = parse_config(&src).with_context(|| {
+        format!(
+            "failed to parse config for --reset-state: {}",
+            resolved.path.display()
+        )
+    })?;
+
+    resolve_state_db_path(&cfg)
+}
+
+fn remove_state_db_files(path: &Path) -> Result<()> {
+    for candidate in [
+        path.to_path_buf(),
+        state_db_sidecar_path(path, "-wal"),
+        state_db_sidecar_path(path, "-shm"),
+    ] {
+        if !candidate.exists() {
+            continue;
+        }
+
+        fs::remove_file(&candidate)
+            .with_context(|| format!("failed to remove state db file: {}", candidate.display()))?;
+    }
+
+    Ok(())
+}
+
+fn state_db_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut raw: OsString = path.as_os_str().to_os_string();
+    raw.push(suffix);
+    PathBuf::from(raw)
 }
 
 async fn run_check_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Result<()> {

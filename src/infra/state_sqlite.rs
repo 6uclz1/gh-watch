@@ -1,8 +1,8 @@
-use std::{fs, path::Path, sync::Mutex};
+use std::{collections::HashSet, fs, path::Path, sync::Mutex};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 
 use crate::{
     domain::{events::WatchEvent, failure::FailureRecord},
@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS polling_cursors (
 CREATE TABLE IF NOT EXISTS timeline_events (
   event_key TEXT PRIMARY KEY,
   payload_json TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  read_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS failure_events (
@@ -67,6 +68,28 @@ CREATE TABLE IF NOT EXISTS failure_events (
 CREATE INDEX IF NOT EXISTS idx_failure_events_failed_at
 ON failure_events (failed_at DESC, id DESC);
 ",
+        )?;
+        Self::ensure_timeline_read_column(&conn)?;
+        Ok(())
+    }
+
+    fn ensure_timeline_read_column(conn: &Connection) -> Result<()> {
+        // Migrate old DBs that were created before `read_at` existed.
+        let mut stmt = conn.prepare("PRAGMA table_info(timeline_events)")?;
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let has_read_at = columns
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .any(|name| name == "read_at");
+
+        if has_read_at {
+            return Ok(());
+        }
+
+        conn.execute("ALTER TABLE timeline_events ADD COLUMN read_at TEXT", [])?;
+        conn.execute(
+            "UPDATE timeline_events SET read_at = created_at WHERE read_at IS NULL",
+            [],
         )?;
         Ok(())
     }
@@ -244,8 +267,11 @@ LIMIT 1
         let payload = serde_json::to_string(event)?;
         conn.execute(
             "
-INSERT OR REPLACE INTO timeline_events (event_key, payload_json, created_at)
-VALUES (?1, ?2, ?3)
+INSERT INTO timeline_events (event_key, payload_json, created_at, read_at)
+VALUES (?1, ?2, ?3, NULL)
+ON CONFLICT(event_key) DO UPDATE
+SET payload_json = excluded.payload_json,
+    created_at = excluded.created_at
 ",
             params![event.event_key(), payload, event.created_at.to_rfc3339()],
         )?;
@@ -271,6 +297,47 @@ LIMIT ?1
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(items)
+    }
+
+    fn mark_timeline_event_read(&self, event_key: &str, read_at: DateTime<Utc>) -> Result<()> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        conn.execute(
+            "
+UPDATE timeline_events
+SET read_at = COALESCE(read_at, ?2)
+WHERE event_key = ?1
+",
+            params![event_key, read_at.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    fn load_read_event_keys(&self, event_keys: &[String]) -> Result<HashSet<String>> {
+        if event_keys.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut read_keys = HashSet::new();
+
+        // Keep SQLite parameter count within the default variable limit.
+        for keys in event_keys.chunks(900) {
+            let placeholders = vec!["?"; keys.len()].join(", ");
+            let sql = format!(
+                "
+SELECT event_key
+FROM timeline_events
+WHERE read_at IS NOT NULL
+  AND event_key IN ({placeholders})
+"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(keys.iter()), |row| row.get(0))?;
+            for row in rows {
+                read_keys.insert(row?);
+            }
+        }
+        Ok(read_keys)
     }
 
     fn cleanup_old(

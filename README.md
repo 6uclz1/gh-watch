@@ -135,6 +135,8 @@ Global filter keys:
 - `g` / `Home`: top
 - `G` / `End`: bottom
 - Mouse click/wheel in timeline: select/scroll
+- Timeline unread marker: `*` means unread, blank means read
+- Read timing: selected by navigation or opened with `Enter` (persisted across restarts)
 
 ## Configuration Notes
 

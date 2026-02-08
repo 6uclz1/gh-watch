@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use gh_watch::app::poll_once::poll_once;
-use gh_watch::config::{Config, NotificationConfig, PollConfig, RepositoryConfig};
+use gh_watch::config::{Config, FiltersConfig, NotificationConfig, PollConfig, RepositoryConfig};
 use gh_watch::domain::events::{EventKind, WatchEvent};
 use gh_watch::domain::failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL};
 use gh_watch::ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort};
@@ -213,16 +213,19 @@ fn cfg() -> Config {
             RepositoryConfig {
                 name: "acme/api".to_string(),
                 enabled: true,
+                event_kinds: None,
             },
             RepositoryConfig {
                 name: "acme/web".to_string(),
                 enabled: true,
+                event_kinds: None,
             },
         ],
         notifications: NotificationConfig {
             enabled: true,
             include_url: true,
         },
+        filters: FiltersConfig::default(),
         poll: PollConfig {
             max_concurrency: 4,
             timeout_seconds: 30,
@@ -243,6 +246,19 @@ fn sample_event_at(repo: &str, id: &str, created_at: chrono::DateTime<Utc>) -> W
         title: "Add API".to_string(),
         url: "https://example.com/pr/1".to_string(),
         created_at,
+        source_item_id: id.to_string(),
+    }
+}
+
+fn sample_event_with_kind_actor(repo: &str, id: &str, kind: EventKind, actor: &str) -> WatchEvent {
+    WatchEvent {
+        event_id: id.to_string(),
+        repo: repo.to_string(),
+        kind,
+        actor: actor.to_string(),
+        title: "Filtered Event".to_string(),
+        url: format!("https://example.com/{id}"),
+        created_at: Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
         source_item_id: id.to_string(),
     }
 }
@@ -365,6 +381,152 @@ async fn second_poll_notifies_new_events_once() {
 
     assert_eq!(out1.notified_count, 1);
     assert_eq!(out2.notified_count, 0);
+}
+
+#[tokio::test]
+async fn global_event_kind_filter_skips_non_target_events() {
+    let gh = FakeGh::default();
+    gh.repos.lock().unwrap().insert(
+        "acme/api".to_string(),
+        vec![sample_event_with_kind_actor(
+            "acme/api",
+            "evt-1",
+            EventKind::PrCreated,
+            "alice",
+        )],
+    );
+
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 5, 0, 0, 0).unwrap(),
+    };
+    let cfg = Config {
+        filters: FiltersConfig {
+            event_kinds: vec![EventKind::IssueCreated],
+            ignore_actors: Vec::new(),
+        },
+        ..cfg()
+    };
+
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock).await.unwrap();
+
+    assert_eq!(out.notified_count, 0);
+    assert!(notifier.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ignore_actors_filter_skips_matching_actor_notifications() {
+    let gh = FakeGh::default();
+    gh.repos.lock().unwrap().insert(
+        "acme/api".to_string(),
+        vec![sample_event_with_kind_actor(
+            "acme/api",
+            "evt-2",
+            EventKind::PrCreated,
+            "dependabot[bot]",
+        )],
+    );
+
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 5, 0, 0, 0).unwrap(),
+    };
+    let cfg = Config {
+        filters: FiltersConfig {
+            event_kinds: Vec::new(),
+            ignore_actors: vec!["dependabot[bot]".to_string()],
+        },
+        ..cfg()
+    };
+
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock).await.unwrap();
+
+    assert_eq!(out.notified_count, 0);
+    assert!(notifier.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn repository_event_kinds_override_global_filter() {
+    let api_event = sample_event_with_kind_actor("acme/api", "evt-api", EventKind::PrCreated, "alice");
+    let web_event = sample_event_with_kind_actor("acme/web", "evt-web", EventKind::PrCreated, "bob");
+
+    let gh = FakeGh::default();
+    gh.repos
+        .lock()
+        .unwrap()
+        .insert("acme/api".to_string(), vec![api_event.clone()]);
+    gh.repos
+        .lock()
+        .unwrap()
+        .insert("acme/web".to_string(), vec![web_event.clone()]);
+
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 5, 0, 0, 0).unwrap(),
+    };
+    let cfg = Config {
+        repositories: vec![
+            RepositoryConfig {
+                name: "acme/api".to_string(),
+                enabled: true,
+                event_kinds: Some(vec![EventKind::PrCreated]),
+            },
+            RepositoryConfig {
+                name: "acme/web".to_string(),
+                enabled: true,
+                event_kinds: None,
+            },
+        ],
+        filters: FiltersConfig {
+            event_kinds: vec![EventKind::IssueCreated],
+            ignore_actors: Vec::new(),
+        },
+        ..cfg()
+    };
+
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock).await.unwrap();
+
+    assert_eq!(out.notified_count, 1);
+    assert_eq!(notifier.sent.lock().unwrap().as_slice(), &[api_event.event_key()]);
 }
 
 #[tokio::test]
@@ -534,6 +696,7 @@ async fn poll_once_limits_repo_concurrency_from_config() {
             .map(|name| RepositoryConfig {
                 name: (*name).to_string(),
                 enabled: true,
+                event_kinds: None,
             })
             .collect(),
         poll: PollConfig {

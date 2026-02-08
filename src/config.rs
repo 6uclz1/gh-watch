@@ -8,6 +8,8 @@ use anyhow::{anyhow, Context, Result};
 use directories::BaseDirs;
 use serde::Deserialize;
 
+use crate::domain::events::EventKind;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default = "default_interval_seconds")]
@@ -24,6 +26,8 @@ pub struct Config {
     pub repositories: Vec<RepositoryConfig>,
     #[serde(default)]
     pub notifications: NotificationConfig,
+    #[serde(default)]
+    pub filters: FiltersConfig,
     #[serde(default)]
     pub poll: PollConfig,
 }
@@ -70,6 +74,8 @@ pub struct RepositoryConfig {
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub event_kinds: Option<Vec<EventKind>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +91,23 @@ impl Default for NotificationConfig {
         Self {
             enabled: true,
             include_url: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FiltersConfig {
+    #[serde(default)]
+    pub event_kinds: Vec<EventKind>,
+    #[serde(default)]
+    pub ignore_actors: Vec<String>,
+}
+
+impl Default for FiltersConfig {
+    fn default() -> Self {
+        Self {
+            event_kinds: Vec::new(),
+            ignore_actors: Vec::new(),
         }
     }
 }

@@ -393,7 +393,7 @@ mod tests {
 
     use super::{enabled_repository_names, handle_stream_event, LoopControl, PollExecutionState};
     use crate::{
-        config::{Config, NotificationConfig, PollConfig, RepositoryConfig},
+        config::{Config, FiltersConfig, NotificationConfig, PollConfig, RepositoryConfig},
         domain::{
             events::{EventKind, WatchEvent},
             failure::FailureRecord,
@@ -562,17 +562,21 @@ mod tests {
                 RepositoryConfig {
                     name: "acme/one".to_string(),
                     enabled: true,
+                    event_kinds: None,
                 },
                 RepositoryConfig {
                     name: "acme/two".to_string(),
                     enabled: false,
+                    event_kinds: None,
                 },
                 RepositoryConfig {
                     name: "acme/three".to_string(),
                     enabled: true,
+                    event_kinds: None,
                 },
             ],
             notifications: NotificationConfig::default(),
+            filters: FiltersConfig::default(),
             poll: PollConfig::default(),
         };
 

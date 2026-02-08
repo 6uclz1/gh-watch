@@ -40,6 +40,8 @@ name = "octocat/hello-world"
     assert!(cfg.repositories[0].enabled);
     assert!(cfg.notifications.enabled);
     assert!(cfg.notifications.include_url);
+    assert!(cfg.filters.event_kinds.is_empty());
+    assert!(cfg.filters.ignore_actors.is_empty());
     assert_eq!(cfg.poll.max_concurrency, 4);
     assert_eq!(cfg.poll.timeout_seconds, 30);
 }
@@ -96,6 +98,48 @@ name = "octocat/hello-world"
 
     let cfg = parse_config(src).expect("zero bootstrap lookback should be accepted");
     assert_eq!(cfg.bootstrap_lookback_hours, 0);
+}
+
+#[test]
+fn parse_config_parses_global_filters_and_repo_override_event_kinds() {
+    let src = r#"
+[filters]
+event_kinds = ["pr_created", "issue_created"]
+ignore_actors = ["dependabot[bot]"]
+
+[[repositories]]
+name = "octocat/hello-world"
+event_kinds = ["pr_created"]
+"#;
+
+    let cfg = parse_config(src).expect("config should parse");
+    assert_eq!(cfg.filters.event_kinds.len(), 2);
+    assert_eq!(cfg.filters.ignore_actors, vec!["dependabot[bot]".to_string()]);
+    assert_eq!(cfg.repositories.len(), 1);
+    assert_eq!(
+        cfg.repositories[0]
+            .event_kinds
+            .as_ref()
+            .expect("repo override should exist")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn parse_config_rejects_unknown_filter_event_kind() {
+    let src = r#"
+[filters]
+event_kinds = ["unknown_kind"]
+
+[[repositories]]
+name = "octocat/hello-world"
+"#;
+
+    let err = parse_config(src).expect_err("unknown kind should fail");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("unknown_kind"));
+    assert!(msg.contains("failed to parse config TOML"));
 }
 
 #[test]

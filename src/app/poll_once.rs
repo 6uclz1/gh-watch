@@ -6,7 +6,7 @@ use std::time::Duration as StdDuration;
 use crate::{
     config::Config,
     domain::{
-        events::WatchEvent,
+        events::{event_matches_notification_filters, EventKind, WatchEvent},
         failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL},
     },
     ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
@@ -27,6 +27,7 @@ enum RepoFetchResult {
         repo_name: String,
         since: chrono::DateTime<Utc>,
         is_bootstrap: bool,
+        allowed_event_kinds: Vec<EventKind>,
         events: Vec<WatchEvent>,
     },
     Failed {
@@ -39,6 +40,7 @@ struct RepoFetchRequest {
     repo_name: String,
     since: chrono::DateTime<Utc>,
     is_bootstrap: bool,
+    allowed_event_kinds: Vec<EventKind>,
 }
 
 pub async fn poll_once<C, S, N, K>(
@@ -64,6 +66,10 @@ where
         let cursor = state
             .get_cursor(&repo.name)
             .with_context(|| format!("failed to load cursor for {}", repo.name))?;
+        let allowed_event_kinds = repo
+            .event_kinds
+            .clone()
+            .unwrap_or_else(|| config.filters.event_kinds.clone());
 
         let Some(since) = cursor else {
             outcome.bootstrap_repos += 1;
@@ -78,6 +84,7 @@ where
                 repo_name: repo.name.clone(),
                 since: bootstrap_since(now, config.bootstrap_lookback_hours),
                 is_bootstrap: true,
+                allowed_event_kinds,
             });
             continue;
         };
@@ -86,6 +93,7 @@ where
             repo_name: repo.name.clone(),
             since,
             is_bootstrap: false,
+            allowed_event_kinds,
         });
     }
 
@@ -97,12 +105,14 @@ where
         let repo_name = request.repo_name;
         let since = request.since;
         let is_bootstrap = request.is_bootstrap;
+        let allowed_event_kinds = request.allowed_event_kinds;
         let result = tokio::time::timeout(timeout, gh.fetch_repo_events(&repo_name, since)).await;
         match result {
             Ok(Ok(events)) => RepoFetchResult::Fetched {
                 repo_name,
                 since,
                 is_bootstrap,
+                allowed_event_kinds,
                 events,
             },
             Ok(Err(err)) => RepoFetchResult::Failed {
@@ -123,6 +133,7 @@ where
                 repo_name,
                 since,
                 is_bootstrap,
+                allowed_event_kinds,
                 events,
             } => {
                 if is_bootstrap {
@@ -142,6 +153,8 @@ where
                         &mut outcome,
                         repo_name.as_str(),
                         since,
+                        &allowed_event_kinds,
+                        &config.filters.ignore_actors,
                         events,
                         now,
                     )?;
@@ -177,6 +190,8 @@ fn process_repo_events<S, N, K>(
     outcome: &mut PollOutcome,
     repo_name: &str,
     since: chrono::DateTime<Utc>,
+    allowed_event_kinds: &[EventKind],
+    ignore_actors: &[String],
     events: Vec<WatchEvent>,
     now: chrono::DateTime<Utc>,
 ) -> Result<()>
@@ -188,6 +203,10 @@ where
     let mut earliest_notification_failure_at: Option<chrono::DateTime<Utc>> = None;
 
     for event in events {
+        if !event_matches_notification_filters(&event, allowed_event_kinds, ignore_actors) {
+            continue;
+        }
+
         let event_key = event.event_key();
         let already_notified = state.is_event_notified(&event_key)?;
         if already_notified {

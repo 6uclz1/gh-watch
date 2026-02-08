@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventKind {
     PrCreated,
     IssueCreated,
@@ -44,4 +45,18 @@ impl WatchEvent {
     pub fn event_key(&self) -> String {
         format!("{}:{}:{}", self.repo, self.kind, self.source_item_id)
     }
+}
+
+pub fn event_matches_notification_filters(
+    event: &WatchEvent,
+    allowed_event_kinds: &[EventKind],
+    ignore_actors: &[String],
+) -> bool {
+    let kind_allowed =
+        allowed_event_kinds.is_empty() || allowed_event_kinds.iter().any(|kind| kind == &event.kind);
+    if !kind_allowed {
+        return false;
+    }
+
+    !ignore_actors.iter().any(|actor| actor == &event.actor)
 }

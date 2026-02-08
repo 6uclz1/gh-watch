@@ -509,6 +509,7 @@ fn render_config(
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!("interval_seconds = {interval_seconds}\n"));
+    out.push_str("bootstrap_lookback_hours = 24\n");
     out.push_str("timeline_limit = 500\n");
     out.push_str("retention_days = 90\n");
     out.push_str("failure_history_limit = 200\n");

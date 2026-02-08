@@ -26,12 +26,19 @@ enum RepoFetchResult {
     Fetched {
         repo_name: String,
         since: chrono::DateTime<Utc>,
+        is_bootstrap: bool,
         events: Vec<WatchEvent>,
     },
     Failed {
         repo_name: String,
         error_message: String,
     },
+}
+
+struct RepoFetchRequest {
+    repo_name: String,
+    since: chrono::DateTime<Utc>,
+    is_bootstrap: bool,
 }
 
 pub async fn poll_once<C, S, N, K>(
@@ -59,26 +66,43 @@ where
             .with_context(|| format!("failed to load cursor for {}", repo.name))?;
 
         let Some(since) = cursor else {
-            state
-                .set_cursor(&repo.name, now)
-                .with_context(|| format!("failed to set bootstrap cursor for {}", repo.name))?;
             outcome.bootstrap_repos += 1;
+            if config.bootstrap_lookback_hours == 0 {
+                state
+                    .set_cursor(&repo.name, now)
+                    .with_context(|| format!("failed to set bootstrap cursor for {}", repo.name))?;
+                continue;
+            }
+
+            repos_to_fetch.push(RepoFetchRequest {
+                repo_name: repo.name.clone(),
+                since: bootstrap_since(now, config.bootstrap_lookback_hours),
+                is_bootstrap: true,
+            });
             continue;
         };
 
-        repos_to_fetch.push((repo.name.clone(), since));
+        repos_to_fetch.push(RepoFetchRequest {
+            repo_name: repo.name.clone(),
+            since,
+            is_bootstrap: false,
+        });
     }
 
     let timeout = StdDuration::from_secs(config.poll.timeout_seconds);
     let max_concurrency = config.poll.max_concurrency;
     let timeout_seconds = config.poll.timeout_seconds;
 
-    let mut fetches = stream::iter(repos_to_fetch.into_iter().map(|(repo_name, since)| async move {
+    let mut fetches = stream::iter(repos_to_fetch.into_iter().map(|request| async move {
+        let repo_name = request.repo_name;
+        let since = request.since;
+        let is_bootstrap = request.is_bootstrap;
         let result = tokio::time::timeout(timeout, gh.fetch_repo_events(&repo_name, since)).await;
         match result {
             Ok(Ok(events)) => RepoFetchResult::Fetched {
                 repo_name,
                 since,
+                is_bootstrap,
                 events,
             },
             Ok(Err(err)) => RepoFetchResult::Failed {
@@ -98,18 +122,31 @@ where
             RepoFetchResult::Fetched {
                 repo_name,
                 since,
+                is_bootstrap,
                 events,
-            } => process_repo_events(
-                config,
-                state,
-                notifier,
-                clock,
-                &mut outcome,
-                repo_name.as_str(),
-                since,
-                events,
-                now,
-            )?,
+            } => {
+                if is_bootstrap {
+                    process_bootstrap_events(
+                        state,
+                        &mut outcome,
+                        repo_name.as_str(),
+                        events,
+                        now,
+                    )?;
+                } else {
+                    process_repo_events(
+                        config,
+                        state,
+                        notifier,
+                        clock,
+                        &mut outcome,
+                        repo_name.as_str(),
+                        since,
+                        events,
+                        now,
+                    )?;
+                }
+            }
             RepoFetchResult::Failed {
                 repo_name,
                 error_message,
@@ -124,6 +161,12 @@ where
     }
 
     Ok(outcome)
+}
+
+fn bootstrap_since(now: chrono::DateTime<Utc>, lookback_hours: u64) -> chrono::DateTime<Utc> {
+    let bounded_hours = lookback_hours.min(i64::MAX as u64) as i64;
+    now.checked_sub_signed(Duration::hours(bounded_hours))
+        .unwrap_or(now)
 }
 
 fn process_repo_events<S, N, K>(
@@ -202,6 +245,28 @@ where
 
     state
         .set_cursor(repo_name, next_cursor)
+        .with_context(|| format!("failed to update cursor for {repo_name}"))?;
+
+    Ok(())
+}
+
+fn process_bootstrap_events<S>(
+    state: &S,
+    outcome: &mut PollOutcome,
+    repo_name: &str,
+    events: Vec<WatchEvent>,
+    now: chrono::DateTime<Utc>,
+) -> Result<()>
+where
+    S: StateStorePort,
+{
+    for event in events {
+        state.append_timeline_event(&event)?;
+        outcome.timeline_events.push(event);
+    }
+
+    state
+        .set_cursor(repo_name, now)
         .with_context(|| format!("failed to update cursor for {repo_name}"))?;
 
     Ok(())

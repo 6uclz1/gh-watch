@@ -32,6 +32,7 @@ name = "octocat/hello-world"
 
     let cfg = parse_config(src).expect("config should parse");
     assert_eq!(cfg.interval_seconds, 300);
+    assert_eq!(cfg.bootstrap_lookback_hours, 24);
     assert_eq!(cfg.timeline_limit, 500);
     assert_eq!(cfg.retention_days, 90);
     assert_eq!(cfg.failure_history_limit, 200);
@@ -82,6 +83,19 @@ name = "octocat/hello-world"
 
     let err = parse_config(src).expect_err("zero timeout_seconds should fail");
     assert!(err.to_string().contains("poll.timeout_seconds"));
+}
+
+#[test]
+fn parse_config_accepts_zero_bootstrap_lookback_for_legacy_mode() {
+    let src = r#"
+bootstrap_lookback_hours = 0
+
+[[repositories]]
+name = "octocat/hello-world"
+"#;
+
+    let cfg = parse_config(src).expect("zero bootstrap lookback should be accepted");
+    assert_eq!(cfg.bootstrap_lookback_hours, 0);
 }
 
 #[test]

@@ -553,6 +553,7 @@ mod tests {
     fn enabled_repository_names_keeps_config_order_and_filters_disabled() {
         let config = Config {
             interval_seconds: 300,
+            bootstrap_lookback_hours: 24,
             timeline_limit: 500,
             retention_days: 90,
             failure_history_limit: 200,

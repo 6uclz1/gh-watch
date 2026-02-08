@@ -12,6 +12,8 @@ use serde::Deserialize;
 pub struct Config {
     #[serde(default = "default_interval_seconds")]
     pub interval_seconds: u64,
+    #[serde(default = "default_bootstrap_lookback_hours")]
+    pub bootstrap_lookback_hours: u64,
     #[serde(default = "default_timeline_limit")]
     pub timeline_limit: usize,
     #[serde(default = "default_retention_days")]
@@ -106,6 +108,10 @@ impl Default for PollConfig {
 
 fn default_interval_seconds() -> u64 {
     300
+}
+
+fn default_bootstrap_lookback_hours() -> u64 {
+    24
 }
 
 fn default_timeline_limit() -> usize {

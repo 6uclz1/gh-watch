@@ -21,6 +21,7 @@ struct FakeGh {
     delays: Arc<Mutex<HashMap<String, StdDuration>>>,
     in_flight: Arc<AtomicUsize>,
     max_in_flight: Arc<AtomicUsize>,
+    fetched_repos: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeGh {
@@ -30,6 +31,10 @@ impl FakeGh {
 
     fn max_concurrency_seen(&self) -> usize {
         self.max_in_flight.load(Ordering::SeqCst)
+    }
+
+    fn fetched_repos(&self) -> Vec<String> {
+        self.fetched_repos.lock().unwrap().clone()
     }
 }
 
@@ -46,6 +51,7 @@ impl GhClientPort for FakeGh {
     ) -> Result<Vec<WatchEvent>> {
         let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+        self.fetched_repos.lock().unwrap().push(repo.to_string());
 
         let delay = {
             let delays = self.delays.lock().unwrap();
@@ -198,6 +204,7 @@ impl ClockPort for FixedClock {
 fn cfg() -> Config {
     Config {
         interval_seconds: 300,
+        bootstrap_lookback_hours: 24,
         timeline_limit: 500,
         retention_days: 90,
         failure_history_limit: 200,
@@ -256,6 +263,69 @@ async fn bootstrap_does_not_notify_and_sets_cursor() {
     assert_eq!(out.notified_count, 0);
     assert_eq!(out.bootstrap_repos, 2);
     assert!(state.get_cursor("acme/api").unwrap().is_some());
+    assert!(notifier.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn bootstrap_lookback_populates_timeline_without_notifications() {
+    let gh = FakeGh::default();
+    gh.repos.lock().unwrap().insert(
+        "acme/api".to_string(),
+        vec![sample_event("acme/api", "boot-api")],
+    );
+    gh.repos.lock().unwrap().insert(
+        "acme/web".to_string(),
+        vec![sample_event("acme/web", "boot-web")],
+    );
+    let state = FakeState::default();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
+    };
+
+    let out = poll_once(&cfg(), &gh, &state, &notifier, &clock)
+        .await
+        .unwrap();
+
+    assert_eq!(out.bootstrap_repos, 2);
+    assert_eq!(out.notified_count, 0);
+    assert_eq!(out.timeline_events.len(), 2);
+    assert!(notifier.sent.lock().unwrap().is_empty());
+    assert_eq!(state.timeline.lock().unwrap().len(), 2);
+    assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), clock.now);
+    assert_eq!(state.get_cursor("acme/web").unwrap().unwrap(), clock.now);
+
+    let mut fetched = gh.fetched_repos();
+    fetched.sort();
+    assert_eq!(fetched, vec!["acme/api".to_string(), "acme/web".to_string()]);
+}
+
+#[tokio::test]
+async fn bootstrap_lookback_zero_keeps_legacy_behavior_without_backfill() {
+    let gh = FakeGh::default();
+    gh.repos.lock().unwrap().insert(
+        "acme/api".to_string(),
+        vec![sample_event("acme/api", "boot-api")],
+    );
+    let state = FakeState::default();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 4, 0, 0, 0).unwrap(),
+    };
+    let cfg = Config {
+        bootstrap_lookback_hours: 0,
+        ..cfg()
+    };
+
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock)
+        .await
+        .unwrap();
+
+    assert_eq!(out.bootstrap_repos, 2);
+    assert_eq!(out.notified_count, 0);
+    assert!(out.timeline_events.is_empty());
+    assert!(state.timeline.lock().unwrap().is_empty());
+    assert!(gh.fetched_repos().is_empty());
     assert!(notifier.sent.lock().unwrap().is_empty());
 }
 

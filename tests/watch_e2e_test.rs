@@ -72,6 +72,7 @@ exit 1
 
     let cfg = Config {
         interval_seconds: 300,
+        bootstrap_lookback_hours: 24,
         timeline_limit: 500,
         retention_days: 90,
         failure_history_limit: 200,

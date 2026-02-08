@@ -154,6 +154,17 @@ Default state DB path:
 
 Use `config.example.toml` as a shareable template.
 
+## Notification Sender IDs
+
+- macOS:
+  - `notifications.macos_bundle_id` を指定可能（未指定時の既定値: `com.apple.Terminal`）
+  - 未指定時は `check` / `watch` 起動時に警告を表示
+- Windows:
+  - `notifications.windows_app_id` を指定可能
+  - 未指定時の既定値は PowerShell の AppUserModelID（`Toast::POWERSHELL_APP_ID`）
+  - 未指定時は `check` / `watch` 起動時に警告を表示
+- いずれも、最終的なバナー表示有無は OS 側の通知設定に依存
+
 ## Developer Quality Gates
 
 CI checks:

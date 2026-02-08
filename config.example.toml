@@ -8,6 +8,8 @@ failure_history_limit = 200
 [notifications]
 enabled = true
 include_url = true
+# macos_bundle_id = "com.apple.Terminal"
+# windows_app_id = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
 
 [filters]
 # event_kinds = ["pr_created", "issue_created", "issue_comment_created", "pr_review_comment_created", "pr_review_requested", "pr_review_submitted", "pr_merged"]

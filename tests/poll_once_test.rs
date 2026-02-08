@@ -12,7 +12,10 @@ use gh_watch::app::poll_once::poll_once;
 use gh_watch::config::{Config, FiltersConfig, NotificationConfig, PollConfig, RepositoryConfig};
 use gh_watch::domain::events::{EventKind, WatchEvent};
 use gh_watch::domain::failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL};
-use gh_watch::ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort};
+use gh_watch::ports::{
+    ClockPort, GhClientPort, NotificationClickSupport, NotificationDispatchResult, NotifierPort,
+    StateStorePort,
+};
 
 #[derive(Clone, Default)]
 struct FakeGh {
@@ -180,13 +183,21 @@ impl NotifierPort for FakeNotifier {
         Ok(())
     }
 
-    fn notify(&self, event: &WatchEvent, _include_url: bool) -> Result<()> {
+    fn click_action_support(&self) -> NotificationClickSupport {
+        NotificationClickSupport::Unsupported
+    }
+
+    fn notify(
+        &self,
+        event: &WatchEvent,
+        _include_url: bool,
+    ) -> Result<NotificationDispatchResult> {
         let event_key = event.event_key();
         if self.fail_once.lock().unwrap().remove(&event_key) {
             return Err(anyhow!("notify failed once"));
         }
         self.sent.lock().unwrap().push(event_key);
-        Ok(())
+        Ok(NotificationDispatchResult::Delivered)
     }
 }
 

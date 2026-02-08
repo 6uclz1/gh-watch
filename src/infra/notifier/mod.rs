@@ -222,6 +222,9 @@ mod tests {
             url: "https://example.com/pr/1".to_string(),
             created_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
             source_item_id: "1".to_string(),
+            subject_author: Some("alice".to_string()),
+            requested_reviewer: None,
+            mentions: Vec::new(),
         }
     }
 

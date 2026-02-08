@@ -15,6 +15,9 @@ fn sample_event(id: &str, created_at: chrono::DateTime<Utc>) -> WatchEvent {
         url: "https://example.com/issues/1".to_string(),
         created_at,
         source_item_id: id.to_string(),
+        subject_author: Some("bob".to_string()),
+        requested_reviewer: None,
+        mentions: Vec::new(),
     }
 }
 

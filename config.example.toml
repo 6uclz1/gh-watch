@@ -10,8 +10,9 @@ enabled = true
 include_url = true
 
 [filters]
-# event_kinds = ["pr_created", "issue_created", "issue_comment_created", "pr_review_comment_created"]
+# event_kinds = ["pr_created", "issue_created", "issue_comment_created", "pr_review_comment_created", "pr_review_requested", "pr_review_submitted", "pr_merged"]
 # ignore_actors = ["dependabot[bot]"]
+# only_involving_me = false
 
 [poll]
 max_concurrency = 4

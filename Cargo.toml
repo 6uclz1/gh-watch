@@ -2,6 +2,13 @@
 name = "gh-watch"
 version = "0.1.0"
 edition = "2021"
+description = "Reliable GitHub PR/Issue watcher with desktop notifications and a TUI timeline"
+license = "UNLICENSED"
+repository = "https://github.com/6uclz1/gh-watch"
+homepage = "https://github.com/6uclz1/gh-watch"
+readme = "README.md"
+categories = ["command-line-utilities", "development-tools"]
+keywords = ["github", "notifications", "cli", "tui", "watcher"]
 
 [lib]
 name = "gh_watch"

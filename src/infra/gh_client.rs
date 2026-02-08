@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -104,9 +107,20 @@ impl GhClientPort for GhCliClient {
         Ok(())
     }
 
+    async fn viewer_login(&self) -> Result<String> {
+        let login = self
+            .run_gh(&["api", "user", "--jq", ".login"])
+            .await
+            .context("failed to load viewer login")?;
+        if login.trim().is_empty() {
+            return Err(anyhow!("viewer login is empty"));
+        }
+        Ok(login)
+    }
+
     async fn fetch_repo_events(&self, repo: &str, since: DateTime<Utc>) -> Result<Vec<WatchEvent>> {
-        let pulls = self
-            .fetch_created_desc_until_since::<GhPull, _, _>(
+        let pulls_created = self
+            .fetch_desc_until_since::<GhPull, _, _>(
                 repo,
                 "pulls",
                 since,
@@ -120,8 +134,25 @@ impl GhClientPort for GhCliClient {
             .await
             .with_context(|| format!("failed to fetch pulls for {repo}"))?;
 
+        let pulls_updated = self
+            .fetch_desc_until_since::<GhPull, _, _>(
+                repo,
+                "pull updates",
+                since,
+                |page| {
+                    format!(
+                        "repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page={PAGE_SIZE}&page={page}"
+                    )
+                },
+                |pr| pr.updated_at.unwrap_or(pr.created_at),
+            )
+            .await
+            .with_context(|| format!("failed to fetch pull updates for {repo}"))?;
+
+        let pulls = merge_pulls_by_id(pulls_created, pulls_updated);
+
         let issues = self
-            .fetch_created_desc_until_since::<GhIssue, _, _>(
+            .fetch_desc_until_since::<GhIssue, _, _>(
                 repo,
                 "issues",
                 since,
@@ -168,7 +199,7 @@ impl GhClientPort for GhCliClient {
 }
 
 impl GhCliClient {
-    async fn fetch_created_desc_until_since<T, E, C>(
+    async fn fetch_desc_until_since<T, E, C>(
         &self,
         repo: &str,
         item_label: &str,
@@ -256,85 +287,213 @@ fn normalize_events_from_items(
     review_comments: Vec<GhComment>,
 ) -> Vec<WatchEvent> {
     let mut events = Vec::new();
+    let pull_author_by_number = pulls
+        .iter()
+        .filter_map(|pr| {
+            pr.user
+                .as_ref()
+                .map(|user| (pr.number_or_id(), user.login.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let issue_author_by_number = issues
+        .iter()
+        .filter_map(|issue| {
+            issue
+                .user
+                .as_ref()
+                .map(|user| (issue.number_or_id(), user.login.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    events.extend(pulls.iter().filter(|pr| pr.created_at > since).map(|pr| {
+        let actor = user_login_or_unknown(pr.user.as_ref());
+        WatchEvent {
+            event_id: format!("pr:{}", pr.id),
+            repo: repo.to_string(),
+            kind: EventKind::PrCreated,
+            actor: actor.clone(),
+            title: pr.title.clone(),
+            url: pr.html_url.clone(),
+            created_at: pr.created_at,
+            source_item_id: pr.id.to_string(),
+            subject_author: Some(actor),
+            requested_reviewer: None,
+            mentions: extract_mentions(&pr.title),
+        }
+    }));
 
     events.extend(
         pulls
-            .into_iter()
-            .filter(|pr| pr.created_at > since)
-            .map(|pr| WatchEvent {
-                event_id: format!("pr:{}", pr.id),
-                repo: repo.to_string(),
-                kind: EventKind::PrCreated,
-                actor: pr
-                    .user
-                    .map(|u| u.login)
-                    .unwrap_or_else(|| "unknown".to_string()),
-                title: pr.title,
-                url: pr.html_url,
-                created_at: pr.created_at,
-                source_item_id: pr.id.to_string(),
-            }),
+            .iter()
+            .filter_map(|pr| {
+                let updated_at = pr.updated_at.unwrap_or(pr.created_at);
+                if updated_at <= since {
+                    return None;
+                }
+                let author = pr.user.as_ref().map(|u| u.login.clone());
+                let actor = user_login_or_unknown(pr.user.as_ref());
+                let merged_at = pr.merged_at?;
+                if merged_at <= since {
+                    return None;
+                }
+                Some(WatchEvent {
+                    event_id: format!("pr-merged:{}", pr.id),
+                    repo: repo.to_string(),
+                    kind: EventKind::PrMerged,
+                    actor: pr
+                        .merged_by
+                        .as_ref()
+                        .map(|u| u.login.clone())
+                        .unwrap_or(actor),
+                    title: format!("Merged: {}", pr.title),
+                    url: pr.html_url.clone(),
+                    created_at: merged_at,
+                    source_item_id: pr.id.to_string(),
+                    subject_author: author,
+                    requested_reviewer: None,
+                    mentions: Vec::new(),
+                })
+            })
+            .collect::<Vec<_>>(),
     );
+
+    for pr in &pulls {
+        let updated_at = pr.updated_at.unwrap_or(pr.created_at);
+        if updated_at <= since {
+            continue;
+        }
+        for reviewer in &pr.requested_reviewers {
+            let actor = user_login_or_unknown(pr.user.as_ref());
+            events.push(WatchEvent {
+                event_id: format!("pr-review-requested:{}:{}", pr.id, reviewer.login),
+                repo: repo.to_string(),
+                kind: EventKind::PrReviewRequested,
+                actor,
+                title: format!("Review requested: {}", pr.title),
+                url: pr.html_url.clone(),
+                created_at: updated_at,
+                source_item_id: format!("{}:{}", pr.id, reviewer.login),
+                subject_author: pr.user.as_ref().map(|u| u.login.clone()),
+                requested_reviewer: Some(reviewer.login.clone()),
+                mentions: Vec::new(),
+            });
+        }
+    }
 
     events.extend(
         issues
-            .into_iter()
+            .iter()
             .filter(|issue| issue.pull_request.is_none())
             .filter(|issue| issue.created_at > since)
-            .map(|issue| WatchEvent {
-                event_id: format!("issue:{}", issue.id),
-                repo: repo.to_string(),
-                kind: EventKind::IssueCreated,
-                actor: issue
-                    .user
-                    .map(|u| u.login)
-                    .unwrap_or_else(|| "unknown".to_string()),
-                title: issue.title,
-                url: issue.html_url,
-                created_at: issue.created_at,
-                source_item_id: issue.id.to_string(),
+            .map(|issue| {
+                let actor = user_login_or_unknown(issue.user.as_ref());
+                WatchEvent {
+                    event_id: format!("issue:{}", issue.id),
+                    repo: repo.to_string(),
+                    kind: EventKind::IssueCreated,
+                    actor: actor.clone(),
+                    title: issue.title.clone(),
+                    url: issue.html_url.clone(),
+                    created_at: issue.created_at,
+                    source_item_id: issue.id.to_string(),
+                    subject_author: Some(actor),
+                    requested_reviewer: None,
+                    mentions: extract_mentions(&issue.title),
+                }
             }),
     );
 
     events.extend(
         issue_comments
-            .into_iter()
+            .iter()
             .filter(|comment| comment.created_at > since)
-            .map(|comment| WatchEvent {
-                event_id: format!("issue-comment:{}", comment.id),
-                repo: repo.to_string(),
-                kind: EventKind::IssueCommentCreated,
-                actor: comment
-                    .user
-                    .map(|u| u.login)
-                    .unwrap_or_else(|| "unknown".to_string()),
-                title: title_from_comment(comment.body.as_deref(), "New issue/PR comment"),
-                url: comment.html_url,
-                created_at: comment.created_at,
-                source_item_id: comment.id.to_string(),
+            .map(|comment| {
+                let body = comment.body.clone().unwrap_or_default();
+                let subject_author = comment
+                    .issue_url
+                    .as_deref()
+                    .and_then(parse_number_from_url)
+                    .and_then(|number| {
+                        pull_author_by_number
+                            .get(&number)
+                            .cloned()
+                            .or_else(|| issue_author_by_number.get(&number).cloned())
+                    });
+                WatchEvent {
+                    event_id: format!("issue-comment:{}", comment.id),
+                    repo: repo.to_string(),
+                    kind: EventKind::IssueCommentCreated,
+                    actor: user_login_or_unknown(comment.user.as_ref()),
+                    title: title_from_comment(comment.body.as_deref(), "New issue/PR comment"),
+                    url: comment.html_url.clone(),
+                    created_at: comment.created_at,
+                    source_item_id: comment.id.to_string(),
+                    subject_author,
+                    requested_reviewer: None,
+                    mentions: extract_mentions(&body),
+                }
             }),
     );
 
-    events.extend(
-        review_comments
-            .into_iter()
-            .filter(|comment| comment.created_at > since)
-            .map(|comment| WatchEvent {
-                event_id: format!("review-comment:{}", comment.id),
-                repo: repo.to_string(),
-                kind: EventKind::PrReviewCommentCreated,
-                actor: comment
-                    .user
-                    .map(|u| u.login)
-                    .unwrap_or_else(|| "unknown".to_string()),
-                title: title_from_comment(comment.body.as_deref(), "New PR review comment"),
-                url: comment.html_url,
-                created_at: comment.created_at,
-                source_item_id: comment.id.to_string(),
-            }),
-    );
+    let mut seen_review_submission_ids = HashSet::new();
+    for comment in review_comments
+        .iter()
+        .filter(|comment| comment.created_at > since)
+    {
+        let body = comment.body.clone().unwrap_or_default();
+        let subject_author = comment
+            .pull_request_url
+            .as_deref()
+            .and_then(parse_number_from_url)
+            .and_then(|number| pull_author_by_number.get(&number).cloned());
+        let actor = user_login_or_unknown(comment.user.as_ref());
+
+        events.push(WatchEvent {
+            event_id: format!("review-comment:{}", comment.id),
+            repo: repo.to_string(),
+            kind: EventKind::PrReviewCommentCreated,
+            actor: actor.clone(),
+            title: title_from_comment(comment.body.as_deref(), "New PR review comment"),
+            url: comment.html_url.clone(),
+            created_at: comment.created_at,
+            source_item_id: comment.id.to_string(),
+            subject_author: subject_author.clone(),
+            requested_reviewer: None,
+            mentions: extract_mentions(&body),
+        });
+
+        if let Some(review_id) = comment.pull_request_review_id {
+            if seen_review_submission_ids.insert(review_id) {
+                events.push(WatchEvent {
+                    event_id: format!("review-submitted:{review_id}"),
+                    repo: repo.to_string(),
+                    kind: EventKind::PrReviewSubmitted,
+                    actor: actor.clone(),
+                    title: title_from_comment(comment.body.as_deref(), "PR review submitted"),
+                    url: comment.html_url.clone(),
+                    created_at: comment.created_at,
+                    source_item_id: review_id.to_string(),
+                    subject_author: subject_author.clone(),
+                    requested_reviewer: None,
+                    mentions: extract_mentions(&body),
+                });
+            }
+        }
+    }
 
     events
+}
+
+fn merge_pulls_by_id(created: Vec<GhPull>, updated: Vec<GhPull>) -> Vec<GhPull> {
+    let mut pulls_by_id = HashMap::new();
+    for pull in created {
+        pulls_by_id.insert(pull.id, pull);
+    }
+    for pull in updated {
+        pulls_by_id.insert(pull.id, pull);
+    }
+    pulls_by_id.into_values().collect()
 }
 
 fn title_from_comment(body: Option<&str>, fallback: &str) -> String {
@@ -357,23 +516,73 @@ fn truncate(input: &str, max_chars: usize) -> String {
     s
 }
 
-#[derive(Debug, Deserialize)]
+fn user_login_or_unknown(user: Option<&GhUser>) -> String {
+    user.map(|u| u.login.clone())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn parse_number_from_url(url: &str) -> Option<i64> {
+    let tail = url.rsplit('/').next()?;
+    let tail = tail.split('?').next().unwrap_or(tail);
+    tail.parse::<i64>().ok()
+}
+
+fn extract_mentions(text: &str) -> Vec<String> {
+    let mut mentions = Vec::new();
+    let bytes = text.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'@' {
+            idx += 1;
+            continue;
+        }
+        idx += 1;
+        let start = idx;
+        while idx < bytes.len() {
+            let ch = bytes[idx] as char;
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                idx += 1;
+                continue;
+            }
+            break;
+        }
+        if idx > start {
+            mentions.push(text[start..idx].to_string());
+        }
+    }
+    mentions
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct GhUser {
     login: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GhPull {
     id: i64,
+    number: Option<i64>,
     title: String,
     html_url: String,
     created_at: DateTime<Utc>,
+    updated_at: Option<DateTime<Utc>>,
+    merged_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    requested_reviewers: Vec<GhUser>,
+    merged_by: Option<GhUser>,
     user: Option<GhUser>,
+}
+
+impl GhPull {
+    fn number_or_id(&self) -> i64 {
+        self.number.unwrap_or(self.id)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct GhIssue {
     id: i64,
+    number: Option<i64>,
     title: String,
     html_url: String,
     created_at: DateTime<Utc>,
@@ -381,9 +590,18 @@ struct GhIssue {
     pull_request: Option<serde_json::Value>,
 }
 
+impl GhIssue {
+    fn number_or_id(&self) -> i64 {
+        self.number.unwrap_or(self.id)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct GhComment {
     id: i64,
+    issue_url: Option<String>,
+    pull_request_url: Option<String>,
+    pull_request_review_id: Option<i64>,
     html_url: String,
     created_at: DateTime<Utc>,
     body: Option<String>,

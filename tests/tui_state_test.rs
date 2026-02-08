@@ -32,6 +32,9 @@ fn ev_with(
         url: format!("https://example.com/{}", id),
         created_at: ts,
         source_item_id: id.to_string(),
+        subject_author: Some(actor.to_string()),
+        requested_reviewer: None,
+        mentions: Vec::new(),
     }
 }
 

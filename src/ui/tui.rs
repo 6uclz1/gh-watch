@@ -54,6 +54,9 @@ pub enum TimelineKindFilter {
     IssueCreated,
     IssueCommentCreated,
     PrReviewCommentCreated,
+    PrReviewRequested,
+    PrReviewSubmitted,
+    PrMerged,
 }
 
 impl TimelineKindFilter {
@@ -63,6 +66,9 @@ impl TimelineKindFilter {
             Self::IssueCreated => "ISSUE",
             Self::IssueCommentCreated => "I-CMT",
             Self::PrReviewCommentCreated => "PR-CMT",
+            Self::PrReviewRequested => "PR-REQ",
+            Self::PrReviewSubmitted => "PR-REV",
+            Self::PrMerged => "PR-MRG",
         }
     }
 
@@ -72,6 +78,9 @@ impl TimelineKindFilter {
             Self::IssueCreated => matches!(kind, EventKind::IssueCreated),
             Self::IssueCommentCreated => matches!(kind, EventKind::IssueCommentCreated),
             Self::PrReviewCommentCreated => matches!(kind, EventKind::PrReviewCommentCreated),
+            Self::PrReviewRequested => matches!(kind, EventKind::PrReviewRequested),
+            Self::PrReviewSubmitted => matches!(kind, EventKind::PrReviewSubmitted),
+            Self::PrMerged => matches!(kind, EventKind::PrMerged),
         }
     }
 
@@ -80,7 +89,10 @@ impl TimelineKindFilter {
             Self::PrCreated => Some(Self::IssueCreated),
             Self::IssueCreated => Some(Self::IssueCommentCreated),
             Self::IssueCommentCreated => Some(Self::PrReviewCommentCreated),
-            Self::PrReviewCommentCreated => None,
+            Self::PrReviewCommentCreated => Some(Self::PrReviewRequested),
+            Self::PrReviewRequested => Some(Self::PrReviewSubmitted),
+            Self::PrReviewSubmitted => Some(Self::PrMerged),
+            Self::PrMerged => None,
         }
     }
 }
@@ -583,6 +595,9 @@ fn event_kind_label(kind: &EventKind) -> &'static str {
         EventKind::IssueCreated => "ISSUE",
         EventKind::IssueCommentCreated => "I-CMT",
         EventKind::PrReviewCommentCreated => "PR-CMT",
+        EventKind::PrReviewRequested => "PR-REQ",
+        EventKind::PrReviewSubmitted => "PR-REV",
+        EventKind::PrMerged => "PR-MRG",
     }
 }
 
@@ -592,6 +607,9 @@ fn event_kind_style(kind: &EventKind) -> Style {
         EventKind::IssueCreated => Style::default().fg(Color::Yellow),
         EventKind::IssueCommentCreated => Style::default().fg(Color::Green),
         EventKind::PrReviewCommentCreated => Style::default().fg(Color::Magenta),
+        EventKind::PrReviewRequested => Style::default().fg(Color::Blue),
+        EventKind::PrReviewSubmitted => Style::default().fg(Color::LightBlue),
+        EventKind::PrMerged => Style::default().fg(Color::LightGreen),
     }
 }
 

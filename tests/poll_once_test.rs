@@ -17,7 +17,7 @@ use gh_watch::ports::{
     StateStorePort,
 };
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct FakeGh {
     repos: Arc<Mutex<HashMap<String, Vec<WatchEvent>>>>,
     fail_repo: Arc<Mutex<Option<String>>>,
@@ -25,6 +25,23 @@ struct FakeGh {
     in_flight: Arc<AtomicUsize>,
     max_in_flight: Arc<AtomicUsize>,
     fetched_repos: Arc<Mutex<Vec<String>>>,
+    viewer_login: Arc<Mutex<String>>,
+    viewer_login_error: Arc<Mutex<Option<String>>>,
+}
+
+impl Default for FakeGh {
+    fn default() -> Self {
+        Self {
+            repos: Arc::new(Mutex::new(HashMap::new())),
+            fail_repo: Arc::new(Mutex::new(None)),
+            delays: Arc::new(Mutex::new(HashMap::new())),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            max_in_flight: Arc::new(AtomicUsize::new(0)),
+            fetched_repos: Arc::new(Mutex::new(Vec::new())),
+            viewer_login: Arc::new(Mutex::new("alice".to_string())),
+            viewer_login_error: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 impl FakeGh {
@@ -45,6 +62,13 @@ impl FakeGh {
 impl GhClientPort for FakeGh {
     async fn check_auth(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn viewer_login(&self) -> Result<String> {
+        if let Some(message) = self.viewer_login_error.lock().unwrap().clone() {
+            return Err(anyhow!(message));
+        }
+        Ok(self.viewer_login.lock().unwrap().clone())
     }
 
     async fn fetch_repo_events(
@@ -254,6 +278,9 @@ fn sample_event_at(repo: &str, id: &str, created_at: chrono::DateTime<Utc>) -> W
         url: "https://example.com/pr/1".to_string(),
         created_at,
         source_item_id: id.to_string(),
+        subject_author: Some("alice".to_string()),
+        requested_reviewer: None,
+        mentions: Vec::new(),
     }
 }
 
@@ -267,6 +294,33 @@ fn sample_event_with_kind_actor(repo: &str, id: &str, kind: EventKind, actor: &s
         url: format!("https://example.com/{id}"),
         created_at: Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
         source_item_id: id.to_string(),
+        subject_author: Some("alice".to_string()),
+        requested_reviewer: None,
+        mentions: Vec::new(),
+    }
+}
+
+fn sample_event_with_involvement(
+    repo: &str,
+    id: &str,
+    kind: EventKind,
+    actor: &str,
+    subject_author: Option<&str>,
+    requested_reviewer: Option<&str>,
+    mentions: &[&str],
+) -> WatchEvent {
+    WatchEvent {
+        event_id: id.to_string(),
+        repo: repo.to_string(),
+        kind,
+        actor: actor.to_string(),
+        title: "Involvement Event".to_string(),
+        url: format!("https://example.com/{id}"),
+        created_at: Utc.with_ymd_and_hms(2025, 1, 2, 1, 0, 0).unwrap(),
+        source_item_id: id.to_string(),
+        subject_author: subject_author.map(ToString::to_string),
+        requested_reviewer: requested_reviewer.map(ToString::to_string),
+        mentions: mentions.iter().map(|v| (*v).to_string()).collect(),
     }
 }
 
@@ -427,6 +481,7 @@ async fn global_event_kind_filter_skips_non_target_events() {
         filters: FiltersConfig {
             event_kinds: vec![EventKind::IssueCreated],
             ignore_actors: Vec::new(),
+            only_involving_me: false,
         },
         ..cfg()
     };
@@ -473,6 +528,7 @@ async fn ignore_actors_filter_skips_matching_actor_notifications() {
         filters: FiltersConfig {
             event_kinds: Vec::new(),
             ignore_actors: vec!["dependabot[bot]".to_string()],
+            only_involving_me: false,
         },
         ..cfg()
     };
@@ -483,6 +539,128 @@ async fn ignore_actors_filter_skips_matching_actor_notifications() {
 
     assert_eq!(out.notified_count, 0);
     assert!(notifier.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn only_involving_me_accepts_review_request_addressed_to_viewer() {
+    let gh = FakeGh::default();
+    gh.repos.lock().unwrap().insert(
+        "acme/api".to_string(),
+        vec![sample_event_with_involvement(
+            "acme/api",
+            "evt-review-request",
+            EventKind::PrReviewRequested,
+            "maintainer",
+            Some("bob"),
+            Some("alice"),
+            &[],
+        )],
+    );
+
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 5, 0, 0, 0).unwrap(),
+    };
+    let cfg = Config {
+        filters: FiltersConfig {
+            event_kinds: Vec::new(),
+            ignore_actors: Vec::new(),
+            only_involving_me: true,
+        },
+        ..cfg()
+    };
+
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock)
+        .await
+        .unwrap();
+
+    assert_eq!(out.notified_count, 1);
+}
+
+#[tokio::test]
+async fn only_involving_me_accepts_mentions_and_own_subject_updates() {
+    let gh = FakeGh::default();
+    gh.repos.lock().unwrap().insert(
+        "acme/api".to_string(),
+        vec![
+            sample_event_with_involvement(
+                "acme/api",
+                "evt-mention",
+                EventKind::IssueCommentCreated,
+                "bob",
+                Some("carol"),
+                None,
+                &["alice"],
+            ),
+            sample_event_with_involvement(
+                "acme/api",
+                "evt-self-author",
+                EventKind::PrReviewCommentCreated,
+                "dave",
+                Some("alice"),
+                None,
+                &[],
+            ),
+            sample_event_with_involvement(
+                "acme/api",
+                "evt-unrelated",
+                EventKind::IssueCommentCreated,
+                "erin",
+                Some("frank"),
+                None,
+                &[],
+            ),
+        ],
+    );
+
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 5, 0, 0, 0).unwrap(),
+    };
+    let cfg = Config {
+        filters: FiltersConfig {
+            event_kinds: Vec::new(),
+            ignore_actors: Vec::new(),
+            only_involving_me: true,
+        },
+        ..cfg()
+    };
+
+    let out = poll_once(&cfg, &gh, &state, &notifier, &clock)
+        .await
+        .unwrap();
+
+    assert_eq!(out.notified_count, 2);
+    let sent = notifier.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(sent.iter().any(|k| k.contains("evt-mention")));
+    assert!(sent.iter().any(|k| k.contains("evt-self-author")));
 }
 
 #[tokio::test]
@@ -535,6 +713,7 @@ async fn repository_event_kinds_override_global_filter() {
         filters: FiltersConfig {
             event_kinds: vec![EventKind::IssueCreated],
             ignore_actors: Vec::new(),
+            only_involving_me: false,
         },
         ..cfg()
     };

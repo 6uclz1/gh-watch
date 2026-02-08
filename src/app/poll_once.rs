@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use futures_util::stream::{self, StreamExt};
+use serde::Serialize;
 use std::time::Duration as StdDuration;
 
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
     ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
 };
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PollOutcome {
     pub notified_count: usize,
     pub bootstrap_repos: usize,
@@ -58,6 +59,15 @@ where
 {
     let now = clock.now();
     state.cleanup_old(config.retention_days, config.failure_history_limit, now)?;
+    let viewer_login = if config.filters.only_involving_me {
+        Some(
+            gh.viewer_login()
+                .await
+                .context("failed to resolve viewer login for only_involving_me filter")?,
+        )
+    } else {
+        None
+    };
 
     let mut outcome = PollOutcome::default();
     let mut repos_to_fetch = Vec::new();
@@ -133,6 +143,7 @@ where
         notifier,
         clock,
         now,
+        viewer_login,
     };
 
     while let Some(fetch_result) = fetches.next().await {
@@ -188,6 +199,7 @@ struct RepoEventProcessingContext<'a, S, N, K> {
     notifier: &'a N,
     clock: &'a K,
     now: chrono::DateTime<Utc>,
+    viewer_login: Option<String>,
 }
 
 struct RepoEventBatch<'a> {
@@ -218,7 +230,13 @@ where
     let mut earliest_notification_failure_at: Option<chrono::DateTime<Utc>> = None;
 
     for event in events {
-        if !event_matches_notification_filters(&event, allowed_event_kinds, ignore_actors) {
+        if !event_matches_notification_filters(
+            &event,
+            allowed_event_kinds,
+            ignore_actors,
+            context.config.filters.only_involving_me,
+            context.viewer_login.as_deref(),
+        ) {
             continue;
         }
 

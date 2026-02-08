@@ -102,6 +102,8 @@ pub struct FiltersConfig {
     pub event_kinds: Vec<EventKind>,
     #[serde(default)]
     pub ignore_actors: Vec<String>,
+    #[serde(default)]
+    pub only_involving_me: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -70,6 +70,69 @@ ON failure_events (failed_at DESC, id DESC);
         )?;
         Ok(())
     }
+
+    pub fn load_timeline_events_since(
+        &self,
+        since: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<WatchEvent>> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut stmt = conn.prepare(
+            "
+SELECT payload_json
+FROM timeline_events
+WHERE created_at >= ?1
+ORDER BY created_at DESC
+LIMIT ?2
+",
+        )?;
+
+        let rows = stmt.query_map(params![since.to_rfc3339(), limit as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let items = rows
+            .map(|row| -> Result<WatchEvent> {
+                let payload = row?;
+                Ok(serde_json::from_str(&payload)?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(items)
+    }
+
+    pub fn load_failures_since(
+        &self,
+        since: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<FailureRecord>> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut stmt = conn.prepare(
+            "
+SELECT kind, repo, failed_at, message
+FROM failure_events
+WHERE failed_at >= ?1
+ORDER BY failed_at DESC, id DESC
+LIMIT ?2
+",
+        )?;
+
+        let rows = stmt.query_map(params![since.to_rfc3339(), limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        let items = rows
+            .map(|row| -> Result<FailureRecord> {
+                let (kind, repo, failed_at, message) = row?;
+                let failed_at = DateTime::parse_from_rfc3339(&failed_at)?.with_timezone(&Utc);
+                Ok(FailureRecord::new(kind, repo, failed_at, message))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(items)
+    }
 }
 
 impl StateStorePort for SqliteStateStore {

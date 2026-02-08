@@ -10,6 +10,9 @@ pub enum EventKind {
     IssueCreated,
     IssueCommentCreated,
     PrReviewCommentCreated,
+    PrReviewRequested,
+    PrReviewSubmitted,
+    PrMerged,
 }
 
 impl EventKind {
@@ -19,6 +22,9 @@ impl EventKind {
             Self::IssueCreated => "issue_created",
             Self::IssueCommentCreated => "issue_comment_created",
             Self::PrReviewCommentCreated => "pr_review_comment_created",
+            Self::PrReviewRequested => "pr_review_requested",
+            Self::PrReviewSubmitted => "pr_review_submitted",
+            Self::PrMerged => "pr_merged",
         }
     }
 }
@@ -39,6 +45,12 @@ pub struct WatchEvent {
     pub url: String,
     pub created_at: DateTime<Utc>,
     pub source_item_id: String,
+    #[serde(default)]
+    pub subject_author: Option<String>,
+    #[serde(default)]
+    pub requested_reviewer: Option<String>,
+    #[serde(default)]
+    pub mentions: Vec<String>,
 }
 
 impl WatchEvent {
@@ -51,6 +63,8 @@ pub fn event_matches_notification_filters(
     event: &WatchEvent,
     allowed_event_kinds: &[EventKind],
     ignore_actors: &[String],
+    only_involving_me: bool,
+    viewer_login: Option<&str>,
 ) -> bool {
     let kind_allowed = allowed_event_kinds.is_empty()
         || allowed_event_kinds.iter().any(|kind| kind == &event.kind);
@@ -58,5 +72,41 @@ pub fn event_matches_notification_filters(
         return false;
     }
 
-    !ignore_actors.iter().any(|actor| actor == &event.actor)
+    if ignore_actors.iter().any(|actor| actor == &event.actor) {
+        return false;
+    }
+
+    if !only_involving_me {
+        return true;
+    }
+
+    let Some(viewer_login) = viewer_login else {
+        return false;
+    };
+    event_involves_viewer(event, viewer_login)
+}
+
+fn event_involves_viewer(event: &WatchEvent, viewer_login: &str) -> bool {
+    if event
+        .requested_reviewer
+        .as_deref()
+        .is_some_and(|reviewer| reviewer.eq_ignore_ascii_case(viewer_login))
+    {
+        return true;
+    }
+
+    if event
+        .mentions
+        .iter()
+        .any(|mention| mention.eq_ignore_ascii_case(viewer_login))
+    {
+        return true;
+    }
+
+    let is_update_event = !matches!(event.kind, EventKind::PrCreated | EventKind::IssueCreated);
+    is_update_event
+        && event
+            .subject_author
+            .as_deref()
+            .is_some_and(|author| author.eq_ignore_ascii_case(viewer_login))
 }

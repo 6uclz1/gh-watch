@@ -7,6 +7,7 @@ use crate::domain::{events::WatchEvent, failure::FailureRecord};
 #[async_trait]
 pub trait GhClientPort: Send + Sync {
     async fn check_auth(&self) -> Result<()>;
+    async fn viewer_login(&self) -> Result<String>;
     async fn fetch_repo_events(&self, repo: &str, since: DateTime<Utc>) -> Result<Vec<WatchEvent>>;
 }
 

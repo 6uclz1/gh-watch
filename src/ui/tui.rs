@@ -488,13 +488,19 @@ fn build_loading_status_line(model: &TuiModel, now: DateTime<Utc>) -> String {
         .poll_started_at
         .map(|started| (now - started).num_seconds().max(0))
         .unwrap_or(0);
+    let spinner = spinner_frame(elapsed_secs);
     let refresh = if model.queued_refresh {
         "queued"
     } else {
         "none"
     };
 
-    format!("loading=on {}s | refresh={refresh}", elapsed_secs)
+    format!("loading=on {spinner} {elapsed_secs}s | refresh={refresh}")
+}
+
+fn spinner_frame(elapsed_secs: i64) -> char {
+    const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+    FRAMES[(elapsed_secs.rem_euclid(FRAMES.len() as i64)) as usize]
 }
 
 fn summarize_failure(failure: &FailureRecord) -> String {
@@ -615,7 +621,25 @@ mod tests {
 
         assert_eq!(
             build_loading_status_line(&model, now),
-            "loading=on 5s | refresh=queued"
+            "loading=on / 5s | refresh=queued"
         );
+    }
+
+    #[test]
+    fn loading_status_line_advances_spinner_frame_while_polling() {
+        let started_at = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let now_a = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 5).unwrap();
+        let now_b = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 6).unwrap();
+
+        let mut model = TuiModel::new(10);
+        model.is_polling = true;
+        model.poll_started_at = Some(started_at);
+
+        let line_a = build_loading_status_line(&model, now_a);
+        let line_b = build_loading_status_line(&model, now_b);
+
+        assert_ne!(line_a, line_b);
+        assert_eq!(line_a, "loading=on / 5s | refresh=none");
+        assert_eq!(line_b, "loading=on - 6s | refresh=none");
     }
 }

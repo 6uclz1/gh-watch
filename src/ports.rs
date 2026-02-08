@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -20,6 +22,8 @@ pub trait StateStorePort: Send + Sync {
     fn latest_failure(&self) -> Result<Option<FailureRecord>>;
     fn append_timeline_event(&self, event: &WatchEvent) -> Result<()>;
     fn load_timeline_events(&self, limit: usize) -> Result<Vec<WatchEvent>>;
+    fn mark_timeline_event_read(&self, event_key: &str, read_at: DateTime<Utc>) -> Result<()>;
+    fn load_read_event_keys(&self, event_keys: &[String]) -> Result<HashSet<String>>;
     fn cleanup_old(
         &self,
         retention_days: u32,

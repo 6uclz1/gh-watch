@@ -180,6 +180,18 @@ impl StateStorePort for FakeState {
         Ok(items)
     }
 
+    fn mark_timeline_event_read(
+        &self,
+        _event_key: &str,
+        _read_at: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn load_read_event_keys(&self, _event_keys: &[String]) -> Result<HashSet<String>> {
+        Ok(HashSet::new())
+    }
+
     fn cleanup_old(
         &self,
         _retention_days: u32,

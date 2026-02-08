@@ -1,4 +1,7 @@
-use std::io::{stdout, Stdout};
+use std::{
+    collections::HashSet,
+    io::{stdout, Stdout},
+};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -101,6 +104,7 @@ impl TimelineKindFilter {
 pub struct TuiModel {
     pub timeline: Vec<WatchEvent>,
     timeline_all: Vec<WatchEvent>,
+    read_event_keys: HashSet<String>,
     pub watched_repositories: Vec<String>,
     pub selected: usize,
     pub timeline_offset: usize,
@@ -126,6 +130,7 @@ impl TuiModel {
         Self {
             timeline: Vec::new(),
             timeline_all: Vec::new(),
+            read_event_keys: HashSet::new(),
             watched_repositories: Vec::new(),
             selected: 0,
             timeline_offset: 0,
@@ -160,6 +165,18 @@ impl TuiModel {
         self.timeline_all.append(&mut events);
         self.normalize_timeline_all();
         self.rebuild_timeline(previous_selected_key);
+    }
+
+    pub fn replace_read_event_keys(&mut self, read_event_keys: HashSet<String>) {
+        self.read_event_keys = read_event_keys;
+    }
+
+    pub(crate) fn mark_event_read(&mut self, event_key: &str) {
+        self.read_event_keys.insert(event_key.to_string());
+    }
+
+    pub(crate) fn is_event_read(&self, event_key: &str) -> bool {
+        self.read_event_keys.contains(event_key)
     }
 
     fn normalize_timeline_all(&mut self) {
@@ -475,15 +492,21 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
             Cell::from("-"),
             Cell::from("-"),
             Cell::from("-"),
+            Cell::from("-"),
             Cell::from("No events yet"),
         ])]
     } else {
-        model.timeline.iter().map(timeline_row).collect()
+        model
+            .timeline
+            .iter()
+            .map(|event| timeline_row(event, model.is_event_read(&event.event_key())))
+            .collect()
     };
 
     let table = Table::new(
         rows,
         [
+            Constraint::Length(1),
             Constraint::Length(14),
             Constraint::Length(8),
             Constraint::Length(22),
@@ -492,7 +515,7 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
         ],
     )
     .header(
-        Row::new(vec!["Time(UTC)", "Type", "Repo", "Actor", "Title"])
+        Row::new(vec!["N", "Time(UTC)", "Type", "Repo", "Actor", "Title"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().borders(Borders::ALL).title("Timeline"))
@@ -613,8 +636,17 @@ fn event_kind_style(kind: &EventKind) -> Style {
     }
 }
 
-fn timeline_row(event: &WatchEvent) -> Row<'static> {
+fn unread_marker(is_read: bool) -> &'static str {
+    if is_read {
+        " "
+    } else {
+        "*"
+    }
+}
+
+fn timeline_row(event: &WatchEvent, is_read: bool) -> Row<'static> {
     Row::new(vec![
+        Cell::from(unread_marker(is_read)),
         Cell::from(format_timeline_time(event.created_at)),
         Cell::from(Span::styled(
             event_kind_label(&event.kind),
@@ -783,9 +815,28 @@ fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use chrono::TimeZone;
 
-    use super::{build_loading_status_line, truncate_tail, TuiModel};
+    use super::{build_loading_status_line, truncate_tail, unread_marker, TuiModel};
+    use crate::domain::events::{EventKind, WatchEvent};
+
+    fn event(id: &str, created_at: chrono::DateTime<chrono::Utc>) -> WatchEvent {
+        WatchEvent {
+            event_id: id.to_string(),
+            repo: "acme/api".to_string(),
+            kind: EventKind::IssueCommentCreated,
+            actor: "dev".to_string(),
+            title: "comment".to_string(),
+            url: format!("https://example.com/{id}"),
+            created_at,
+            source_item_id: id.to_string(),
+            subject_author: Some("dev".to_string()),
+            requested_reviewer: None,
+            mentions: Vec::new(),
+        }
+    }
 
     #[test]
     fn truncate_tail_adds_ellipsis_for_long_values() {
@@ -826,5 +877,35 @@ mod tests {
         assert_ne!(line_a, line_b);
         assert_eq!(line_a, "loading=on / 5s | refresh=none");
         assert_eq!(line_b, "loading=on - 6s | refresh=none");
+    }
+
+    #[test]
+    fn unread_marker_shows_asterisk_only_for_unread_event() {
+        assert_eq!(unread_marker(false), "*");
+        assert_eq!(unread_marker(true), " ");
+    }
+
+    #[test]
+    fn model_read_state_can_be_replaced_and_extended() {
+        let mut model = TuiModel::new(10);
+        let a = event(
+            "a",
+            chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        );
+        let b = event(
+            "b",
+            chrono::Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
+        );
+        model.replace_timeline(vec![a.clone(), b.clone()]);
+
+        let key_a = a.event_key();
+        let key_b = b.event_key();
+        model.replace_read_event_keys(HashSet::from([key_a.clone()]));
+        assert!(model.is_event_read(&key_a));
+        assert!(!model.is_event_read(&key_b));
+
+        model.mark_event_read(&key_b);
+        assert!(model.is_event_read(&key_a));
+        assert!(model.is_event_read(&key_b));
     }
 }

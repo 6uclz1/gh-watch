@@ -3,6 +3,7 @@ use gh_watch::domain::events::{EventKind, WatchEvent};
 use gh_watch::domain::failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL};
 use gh_watch::infra::state_sqlite::SqliteStateStore;
 use gh_watch::ports::StateStorePort;
+use rusqlite::params;
 use tempfile::tempdir;
 
 fn sample_event(id: &str, created_at: chrono::DateTime<Utc>) -> WatchEvent {
@@ -124,4 +125,119 @@ fn failure_history_limit_keeps_recent_records_only() {
         .query_row("SELECT COUNT(*) FROM failure_events", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 2);
+}
+
+#[test]
+fn opening_legacy_timeline_schema_marks_existing_events_as_read() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let legacy_event = sample_event(
+        "legacy-1",
+        Utc.with_ymd_and_hms(2025, 1, 7, 9, 0, 0).unwrap(),
+    );
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "
+CREATE TABLE timeline_events (
+  event_key TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+",
+    )
+    .unwrap();
+    conn.execute(
+        "
+INSERT INTO timeline_events (event_key, payload_json, created_at)
+VALUES (?1, ?2, ?3)
+",
+        params![
+            legacy_event.event_key(),
+            serde_json::to_string(&legacy_event).unwrap(),
+            legacy_event.created_at.to_rfc3339(),
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = SqliteStateStore::new(&db).unwrap();
+    let key = legacy_event.event_key();
+    let read_keys = store
+        .load_read_event_keys(std::slice::from_ref(&key))
+        .unwrap();
+    assert!(read_keys.contains(&key));
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let read_at: Option<String> = conn
+        .query_row(
+            "SELECT read_at FROM timeline_events WHERE event_key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(read_at, Some(legacy_event.created_at.to_rfc3339()));
+}
+
+#[test]
+fn appended_event_is_unread_until_explicitly_marked_read() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let store = SqliteStateStore::new(&db).unwrap();
+    let event = sample_event(
+        "unread-1",
+        Utc.with_ymd_and_hms(2025, 1, 8, 10, 0, 0).unwrap(),
+    );
+    let key = event.event_key();
+
+    store.append_timeline_event(&event).unwrap();
+    let unread = store
+        .load_read_event_keys(std::slice::from_ref(&key))
+        .unwrap();
+    assert!(!unread.contains(&key));
+
+    let read_at = Utc.with_ymd_and_hms(2025, 1, 8, 10, 5, 0).unwrap();
+    store.mark_timeline_event_read(&key, read_at).unwrap();
+
+    let read = store
+        .load_read_event_keys(std::slice::from_ref(&key))
+        .unwrap();
+    assert!(read.contains(&key));
+}
+
+#[test]
+fn upserting_same_event_key_preserves_read_state() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let store = SqliteStateStore::new(&db).unwrap();
+    let created_at = Utc.with_ymd_and_hms(2025, 1, 9, 11, 0, 0).unwrap();
+    let key = sample_event("sticky-read", created_at).event_key();
+
+    store
+        .append_timeline_event(&sample_event("sticky-read", created_at))
+        .unwrap();
+    let read_at = Utc.with_ymd_and_hms(2025, 1, 9, 11, 2, 0).unwrap();
+    store.mark_timeline_event_read(&key, read_at).unwrap();
+
+    let mut updated = sample_event(
+        "sticky-read",
+        Utc.with_ymd_and_hms(2025, 1, 9, 11, 30, 0).unwrap(),
+    );
+    updated.title = "Updated title".to_string();
+    store.append_timeline_event(&updated).unwrap();
+
+    let read = store
+        .load_read_event_keys(std::slice::from_ref(&key))
+        .unwrap();
+    assert!(read.contains(&key));
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let persisted_read_at: Option<String> = conn
+        .query_row(
+            "SELECT read_at FROM timeline_events WHERE event_key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted_read_at, Some(read_at.to_rfc3339()));
 }

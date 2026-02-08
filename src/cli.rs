@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     ffi::{OsStr, OsString},
     fs,
     io::{self, Write},
@@ -337,6 +337,14 @@ where
 
     fn load_timeline_events(&self, limit: usize) -> Result<Vec<crate::domain::events::WatchEvent>> {
         self.inner.load_timeline_events(limit)
+    }
+
+    fn mark_timeline_event_read(&self, _event_key: &str, _read_at: DateTime<Utc>) -> Result<()> {
+        Ok(())
+    }
+
+    fn load_read_event_keys(&self, event_keys: &[String]) -> Result<HashSet<String>> {
+        self.inner.load_read_event_keys(event_keys)
     }
 
     fn cleanup_old(

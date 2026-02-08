@@ -124,6 +124,7 @@ where
                             model.status_line = format!("open failed: {err}");
                         }
                     }
+                    mark_selected_event_read(model, state, clock);
                     LoopControl::Redraw
                 }
                 InputCommand::ToggleHelp => {
@@ -147,6 +148,7 @@ where
                 | InputCommand::JumpBottom
                 | InputCommand::SelectIndex(_) => {
                     handle_input(model, cmd);
+                    mark_selected_event_read(model, state, clock);
                     LoopControl::Redraw
                 }
                 InputCommand::None => LoopControl::Continue,
@@ -159,6 +161,7 @@ where
                 | InputCommand::ScrollDown
                 | InputCommand::SelectIndex(_) => {
                     handle_input(model, cmd);
+                    mark_selected_event_read(model, state, clock);
                     LoopControl::Redraw
                 }
                 _ => LoopControl::Continue,
@@ -190,6 +193,32 @@ where
         }
         None => LoopControl::Quit,
     }
+}
+
+fn mark_selected_event_read<S, K>(model: &mut TuiModel, state: &S, clock: &K)
+where
+    S: StateStorePort,
+    K: ClockPort,
+{
+    let Some(event_key) = model
+        .timeline
+        .get(model.selected)
+        .map(|event| event.event_key())
+    else {
+        return;
+    };
+
+    if model.is_event_read(&event_key) {
+        return;
+    }
+
+    if let Err(err) = state.mark_timeline_event_read(&event_key, clock.now()) {
+        tracing::warn!(error = %err, event_key = %event_key, "failed to persist read state");
+        model.status_line = format!("read mark failed: {err}");
+        return;
+    }
+
+    model.mark_event_read(&event_key);
 }
 
 fn enabled_repository_names(config: &Config) -> Vec<String> {
@@ -261,7 +290,14 @@ where
     let mut ui = TerminalUi::new()?;
     let mut model = TuiModel::new(config.timeline_limit);
     model.watched_repositories = enabled_repository_names(config);
-    model.replace_timeline(state.load_timeline_events(config.timeline_limit)?);
+    let timeline = state.load_timeline_events(config.timeline_limit)?;
+    let timeline_keys = timeline
+        .iter()
+        .map(|event| event.event_key())
+        .collect::<Vec<_>>();
+    let read_event_keys = state.load_read_event_keys(&timeline_keys)?;
+    model.replace_timeline(timeline);
+    model.replace_read_event_keys(read_event_keys);
     model.latest_failure = state.latest_failure()?;
     model.status_line = "ready".to_string();
     model.next_poll_at = Some(clock.now());
@@ -403,7 +439,10 @@ fn open_url_in_browser(url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
 
     use anyhow::{anyhow, Result};
     use chrono::{TimeZone, Utc};
@@ -425,11 +464,21 @@ mod tests {
     struct FakeState {
         failures: Arc<Mutex<Vec<FailureRecord>>>,
         fail_record_failure: Arc<Mutex<bool>>,
+        marked_read_event_keys: Arc<Mutex<Vec<String>>>,
+        fail_mark_read: Arc<Mutex<bool>>,
     }
 
     impl FakeState {
         fn set_record_failure_error(&self, should_fail: bool) {
             *self.fail_record_failure.lock().unwrap() = should_fail;
+        }
+
+        fn marked_read_event_keys(&self) -> Vec<String> {
+            self.marked_read_event_keys.lock().unwrap().clone()
+        }
+
+        fn set_mark_read_error(&self, should_fail: bool) {
+            *self.fail_mark_read.lock().unwrap() = should_fail;
         }
     }
 
@@ -474,6 +523,31 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn mark_timeline_event_read(
+            &self,
+            event_key: &str,
+            _read_at: chrono::DateTime<Utc>,
+        ) -> Result<()> {
+            if *self.fail_mark_read.lock().unwrap() {
+                return Err(anyhow!("state store down"));
+            }
+            self.marked_read_event_keys
+                .lock()
+                .unwrap()
+                .push(event_key.to_string());
+            Ok(())
+        }
+
+        fn load_read_event_keys(&self, event_keys: &[String]) -> Result<HashSet<String>> {
+            let existing = self.marked_read_event_keys.lock().unwrap().clone();
+            let existing = existing.into_iter().collect::<HashSet<_>>();
+            Ok(event_keys
+                .iter()
+                .filter(|key| existing.contains(*key))
+                .cloned()
+                .collect())
+        }
+
         fn cleanup_old(
             &self,
             _retention_days: u32,
@@ -500,6 +574,22 @@ mod tests {
 
     fn open_ok(_url: &str) -> Result<()> {
         Ok(())
+    }
+
+    fn timeline_event(id: &str, created_at: chrono::DateTime<Utc>) -> WatchEvent {
+        WatchEvent {
+            event_id: id.to_string(),
+            repo: "acme/api".to_string(),
+            kind: EventKind::IssueCommentCreated,
+            actor: "dev".to_string(),
+            title: "comment".to_string(),
+            url: format!("https://example.com/{id}"),
+            created_at,
+            source_item_id: id.to_string(),
+            subject_author: Some("dev".to_string()),
+            requested_reviewer: None,
+            mentions: Vec::new(),
+        }
     }
 
     #[test]
@@ -614,19 +704,7 @@ mod tests {
             now: Utc.with_ymd_and_hms(2025, 1, 9, 0, 0, 0).unwrap(),
         };
         let mut model = TuiModel::new(10);
-        model.timeline = vec![WatchEvent {
-            event_id: "ev1".to_string(),
-            repo: "acme/api".to_string(),
-            kind: EventKind::IssueCommentCreated,
-            actor: "dev".to_string(),
-            title: "comment".to_string(),
-            url: "https://example.com/ev1".to_string(),
-            created_at: clock.now,
-            source_item_id: "ev1".to_string(),
-            subject_author: Some("dev".to_string()),
-            requested_reviewer: None,
-            mentions: Vec::new(),
-        }];
+        model.timeline = vec![timeline_event("ev1", clock.now)];
         model.selected = 0;
 
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -646,25 +724,104 @@ mod tests {
     }
 
     #[test]
+    fn navigation_marks_selected_event_as_read() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 0, 30, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+        model.timeline = vec![
+            timeline_event("ev-nav-1", clock.now),
+            timeline_event("ev-nav-2", clock.now),
+        ];
+        model.selected = 0;
+
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(key))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert_eq!(model.selected, 1);
+        assert_eq!(
+            state.marked_read_event_keys(),
+            vec![model.timeline[1].event_key()]
+        );
+    }
+
+    #[test]
+    fn enter_marks_selected_event_as_read_without_navigation() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 1, 0, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+        model.timeline = vec![timeline_event("ev-enter-read", clock.now)];
+        model.selected = 0;
+
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(key))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert_eq!(
+            state.marked_read_event_keys(),
+            vec![model.timeline[0].event_key()]
+        );
+    }
+
+    #[test]
+    fn read_mark_failure_keeps_event_unread_and_sets_status() {
+        let state = FakeState::default();
+        state.set_mark_read_error(true);
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 1, 30, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+        model.timeline = vec![
+            timeline_event("ev-read-fail-1", clock.now),
+            timeline_event("ev-read-fail-2", clock.now),
+        ];
+        model.selected = 0;
+
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(key))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert_eq!(model.selected, 1);
+        assert!(state.marked_read_event_keys().is_empty());
+        assert!(model
+            .status_line
+            .contains("read mark failed: state store down"));
+        assert!(!model.is_event_read(&model.timeline[1].event_key()));
+    }
+
+    #[test]
     fn enter_open_failure_updates_status_and_keeps_loop_alive() {
         let state = FakeState::default();
         let clock = FixedClock {
             now: Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap(),
         };
         let mut model = TuiModel::new(10);
-        model.timeline = vec![WatchEvent {
-            event_id: "ev2".to_string(),
-            repo: "acme/api".to_string(),
-            kind: EventKind::IssueCommentCreated,
-            actor: "dev".to_string(),
-            title: "comment".to_string(),
-            url: "https://example.com/ev2".to_string(),
-            created_at: clock.now,
-            source_item_id: "ev2".to_string(),
-            subject_author: Some("dev".to_string()),
-            requested_reviewer: None,
-            mentions: Vec::new(),
-        }];
+        model.timeline = vec![timeline_event("ev2", clock.now)];
         model.selected = 0;
 
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -681,6 +838,10 @@ mod tests {
         assert!(model
             .status_line
             .contains("open failed: browser unavailable"));
+        assert_eq!(
+            state.marked_read_event_keys(),
+            vec![model.timeline[0].event_key()]
+        );
     }
 
     #[test]

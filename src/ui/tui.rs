@@ -38,13 +38,57 @@ pub enum InputCommand {
     ToggleHelp,
     Refresh,
     OpenSelectedUrl,
+    StartSearch,
+    SearchInput(char),
+    SearchBackspace,
+    FinishSearch,
+    CycleKindFilter,
+    ClearSearchAndFilter,
     Quit,
     None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineKindFilter {
+    PrCreated,
+    IssueCreated,
+    IssueCommentCreated,
+    PrReviewCommentCreated,
+}
+
+impl TimelineKindFilter {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::PrCreated => "PR",
+            Self::IssueCreated => "ISSUE",
+            Self::IssueCommentCreated => "I-CMT",
+            Self::PrReviewCommentCreated => "PR-CMT",
+        }
+    }
+
+    fn matches(&self, kind: &EventKind) -> bool {
+        match self {
+            Self::PrCreated => matches!(kind, EventKind::PrCreated),
+            Self::IssueCreated => matches!(kind, EventKind::IssueCreated),
+            Self::IssueCommentCreated => matches!(kind, EventKind::IssueCommentCreated),
+            Self::PrReviewCommentCreated => matches!(kind, EventKind::PrReviewCommentCreated),
+        }
+    }
+
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::PrCreated => Some(Self::IssueCreated),
+            Self::IssueCreated => Some(Self::IssueCommentCreated),
+            Self::IssueCommentCreated => Some(Self::PrReviewCommentCreated),
+            Self::PrReviewCommentCreated => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct TuiModel {
     pub timeline: Vec<WatchEvent>,
+    timeline_all: Vec<WatchEvent>,
     pub watched_repositories: Vec<String>,
     pub selected: usize,
     pub timeline_offset: usize,
@@ -59,6 +103,9 @@ pub struct TuiModel {
     pub is_polling: bool,
     pub poll_started_at: Option<DateTime<Utc>>,
     pub queued_refresh: bool,
+    pub search_mode: bool,
+    pub search_query: String,
+    pub kind_filter: Option<TimelineKindFilter>,
     limit: usize,
 }
 
@@ -66,6 +113,7 @@ impl TuiModel {
     pub fn new(limit: usize) -> Self {
         Self {
             timeline: Vec::new(),
+            timeline_all: Vec::new(),
             watched_repositories: Vec::new(),
             selected: 0,
             timeline_offset: 0,
@@ -80,23 +128,70 @@ impl TuiModel {
             is_polling: false,
             poll_started_at: None,
             queued_refresh: false,
+            search_mode: false,
+            search_query: String::new(),
+            kind_filter: None,
             limit,
         }
     }
 
     pub fn push_timeline(&mut self, mut events: Vec<WatchEvent>) {
-        let previous_selected_key = self
-            .selected_event_key
-            .clone()
-            .or_else(|| self.timeline.get(self.selected).map(WatchEvent::event_key));
+        let previous_selected_key = self.snapshot_selected_key();
+        self.timeline_all.append(&mut events);
+        self.normalize_timeline_all();
+        self.rebuild_timeline(previous_selected_key);
+    }
 
-        self.timeline.append(&mut events);
-        self.timeline
+    pub fn replace_timeline(&mut self, mut events: Vec<WatchEvent>) {
+        let previous_selected_key = self.snapshot_selected_key();
+        self.timeline_all.clear();
+        self.timeline_all.append(&mut events);
+        self.normalize_timeline_all();
+        self.rebuild_timeline(previous_selected_key);
+    }
+
+    fn normalize_timeline_all(&mut self) {
+        self.timeline_all
             .sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        self.timeline
+        self.timeline_all
             .dedup_by(|a, b| a.event_key() == b.event_key());
-        self.timeline.truncate(self.limit);
+        self.timeline_all.truncate(self.limit);
+    }
 
+    fn snapshot_selected_key(&self) -> Option<String> {
+        self.selected_event_key
+            .clone()
+            .or_else(|| self.timeline.get(self.selected).map(WatchEvent::event_key))
+    }
+
+    fn rebuild_timeline(&mut self, previous_selected_key: Option<String>) {
+        let query = self.search_query.to_ascii_lowercase();
+        self.timeline = self
+            .timeline_all
+            .iter()
+            .filter(|event| {
+                if let Some(kind_filter) = self.kind_filter {
+                    if !kind_filter.matches(&event.kind) {
+                        return false;
+                    }
+                }
+
+                if query.is_empty() {
+                    return true;
+                }
+
+                let repo = event.repo.to_ascii_lowercase();
+                let actor = event.actor.to_ascii_lowercase();
+                let title = event.title.to_ascii_lowercase();
+                repo.contains(&query) || actor.contains(&query) || title.contains(&query)
+            })
+            .cloned()
+            .collect();
+
+        self.restore_selection(previous_selected_key);
+    }
+
+    fn restore_selection(&mut self, previous_selected_key: Option<String>) {
         if self.timeline.is_empty() {
             self.selected = 0;
             self.timeline_offset = 0;
@@ -117,6 +212,37 @@ impl TuiModel {
         self.sync_selected_event_key();
     }
 
+    fn cycle_kind_filter(&mut self) {
+        let previous_selected_key = self
+            .snapshot_selected_key();
+        self.kind_filter = match self.kind_filter {
+            None => Some(TimelineKindFilter::PrCreated),
+            Some(kind) => kind.next(),
+        };
+        self.rebuild_timeline(previous_selected_key);
+    }
+
+    fn clear_search_and_filter(&mut self) {
+        let previous_selected_key = self.snapshot_selected_key();
+        self.search_mode = false;
+        self.search_query.clear();
+        self.kind_filter = None;
+        self.rebuild_timeline(previous_selected_key);
+    }
+
+    fn push_search_char(&mut self, c: char) {
+        let previous_selected_key = self.snapshot_selected_key();
+        self.search_mode = true;
+        self.search_query.push(c);
+        self.rebuild_timeline(previous_selected_key);
+    }
+
+    fn pop_search_char(&mut self) {
+        let previous_selected_key = self.snapshot_selected_key();
+        self.search_query.pop();
+        self.rebuild_timeline(previous_selected_key);
+    }
+
     fn sync_selected_event_key(&mut self) {
         self.selected_event_key = self.timeline.get(self.selected).map(WatchEvent::event_key);
     }
@@ -130,7 +256,11 @@ pub fn parse_input(key: KeyEvent) -> InputCommand {
     match key.code {
         KeyCode::Char('q') => InputCommand::Quit,
         KeyCode::Char('r') => InputCommand::Refresh,
+        KeyCode::Char('/') => InputCommand::StartSearch,
+        KeyCode::Char('f') => InputCommand::CycleKindFilter,
         KeyCode::Char('?') => InputCommand::ToggleHelp,
+        KeyCode::Esc => InputCommand::ClearSearchAndFilter,
+        KeyCode::Backspace => InputCommand::SearchBackspace,
         KeyCode::Enter => InputCommand::OpenSelectedUrl,
         KeyCode::Up | KeyCode::Char('k') => InputCommand::ScrollUp,
         KeyCode::Down | KeyCode::Char('j') => InputCommand::ScrollDown,
@@ -174,6 +304,24 @@ pub fn parse_mouse_input(mouse: MouseEvent, terminal_area: Rect, model: &TuiMode
 
 pub fn handle_input(model: &mut TuiModel, command: InputCommand) {
     match command {
+        InputCommand::StartSearch => {
+            model.search_mode = true;
+        }
+        InputCommand::SearchInput(c) => {
+            model.push_search_char(c);
+        }
+        InputCommand::SearchBackspace => {
+            model.pop_search_char();
+        }
+        InputCommand::FinishSearch => {
+            model.search_mode = false;
+        }
+        InputCommand::CycleKindFilter => {
+            model.cycle_kind_filter();
+        }
+        InputCommand::ClearSearchAndFilter => {
+            model.clear_search_and_filter();
+        }
         InputCommand::ToggleHelp => {
             model.help_visible = !model.help_visible;
         }
@@ -267,7 +415,7 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     let vertical_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),
+            Constraint::Length(8),
             Constraint::Min(5),
             Constraint::Length(5),
             Constraint::Length(3),
@@ -304,6 +452,7 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
             "last_success={} | next_poll={}",
             last_success, next_poll
         )),
+        Line::from(build_filter_status_line(model)),
         Line::from(format!("latest_failure={latest_failure}")),
     ])
     .block(Block::default().borders(Borders::ALL).title("Status"));
@@ -408,7 +557,7 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     };
     let keys = Paragraph::new(vec![
         Line::from(
-            "q quit | r refresh | ? help | ↑/↓ or j/k move | PgUp/PgDn page | g/G top/bottom | Enter open",
+            "q quit | r refresh | / search | f kind filter | Esc clear filters | ? help | Enter open",
         ),
         Line::from(loading_hint),
     ])
@@ -498,6 +647,20 @@ fn build_loading_status_line(model: &TuiModel, now: DateTime<Utc>) -> String {
     format!("loading=on {spinner} {elapsed_secs}s | refresh={refresh}")
 }
 
+fn build_filter_status_line(model: &TuiModel) -> String {
+    let search = if model.search_query.is_empty() {
+        "-".to_string()
+    } else {
+        model.search_query.clone()
+    };
+    let kind = model
+        .kind_filter
+        .map(|kind| kind.label().to_string())
+        .unwrap_or_else(|| "ALL".to_string());
+    let mode = if model.search_mode { "search" } else { "browse" };
+    format!("filters: search={search} | kind={kind} | mode={mode}")
+}
+
 fn spinner_frame(elapsed_secs: i64) -> char {
     const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
     FRAMES[(elapsed_secs.rem_euclid(FRAMES.len() as i64)) as usize]
@@ -522,7 +685,7 @@ fn timeline_inner_area(area: Rect) -> Rect {
     let vertical_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),
+            Constraint::Length(8),
             Constraint::Min(5),
             Constraint::Length(5),
             Constraint::Length(3),
@@ -564,6 +727,7 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from("q: quit, r: refresh, ?: toggle help"),
+        Line::from("/: start search, f: cycle kind filter, Esc: clear search/filter"),
         Line::from("up/down or j/k: move one row"),
         Line::from("page up/page down: move one page"),
         Line::from("g/home: top, G/end: bottom"),

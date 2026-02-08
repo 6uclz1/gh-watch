@@ -5,12 +5,30 @@ use gh_watch::ui::tui::{handle_input, parse_input, parse_mouse_input, InputComma
 use ratatui::layout::Rect;
 
 fn ev(id: &str, ts: chrono::DateTime<Utc>) -> WatchEvent {
+    ev_with(
+        id,
+        ts,
+        EventKind::IssueCommentCreated,
+        "acme/api",
+        "dev",
+        &format!("comment {}", id),
+    )
+}
+
+fn ev_with(
+    id: &str,
+    ts: chrono::DateTime<Utc>,
+    kind: EventKind,
+    repo: &str,
+    actor: &str,
+    title: &str,
+) -> WatchEvent {
     WatchEvent {
         event_id: id.to_string(),
-        repo: "acme/api".to_string(),
-        kind: EventKind::IssueCommentCreated,
-        actor: "dev".to_string(),
-        title: format!("comment {}", id),
+        repo: repo.to_string(),
+        kind,
+        actor: actor.to_string(),
+        title: title.to_string(),
         url: format!("https://example.com/{}", id),
         created_at: ts,
         source_item_id: id.to_string(),
@@ -110,6 +128,18 @@ fn extended_navigation_keys_map_to_commands() {
         parse_input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
         InputCommand::JumpBottom
     );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+        InputCommand::StartSearch
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
+        InputCommand::CycleKindFilter
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        InputCommand::ClearSearchAndFilter
+    );
 }
 
 #[test]
@@ -203,6 +233,114 @@ fn timeline_selection_falls_back_when_selected_event_drops_out() {
 }
 
 #[test]
+fn search_input_filters_repo_actor_and_title_incrementally() {
+    let mut model = TuiModel::new(10);
+    model.push_timeline(vec![
+        ev_with(
+            "1",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            EventKind::PrCreated,
+            "acme/api",
+            "alice",
+            "Fix parser",
+        ),
+        ev_with(
+            "2",
+            Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
+            EventKind::IssueCreated,
+            "acme/web",
+            "bob",
+            "Update docs",
+        ),
+    ]);
+
+    handle_input(&mut model, InputCommand::StartSearch);
+    handle_input(&mut model, InputCommand::SearchInput('w'));
+    assert_eq!(model.timeline.len(), 1);
+    assert_eq!(model.timeline[0].event_id, "2");
+
+    handle_input(&mut model, InputCommand::SearchInput('e'));
+    assert_eq!(model.timeline.len(), 1);
+    assert_eq!(model.timeline[0].event_id, "2");
+}
+
+#[test]
+fn kind_filter_cycles_and_escape_clears_all_filters() {
+    let mut model = TuiModel::new(10);
+    model.push_timeline(vec![
+        ev_with(
+            "pr",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            EventKind::PrCreated,
+            "acme/api",
+            "alice",
+            "PR created",
+        ),
+        ev_with(
+            "issue",
+            Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
+            EventKind::IssueCreated,
+            "acme/api",
+            "alice",
+            "Issue created",
+        ),
+    ]);
+
+    handle_input(&mut model, InputCommand::CycleKindFilter);
+    assert_eq!(model.timeline.len(), 1);
+    assert_eq!(model.timeline[0].event_id, "pr");
+
+    handle_input(&mut model, InputCommand::CycleKindFilter);
+    assert_eq!(model.timeline.len(), 1);
+    assert_eq!(model.timeline[0].event_id, "issue");
+
+    handle_input(&mut model, InputCommand::ClearSearchAndFilter);
+    assert_eq!(model.timeline.len(), 2);
+}
+
+#[test]
+fn selection_remains_valid_when_filters_change() {
+    let mut model = TuiModel::new(10);
+    model.push_timeline(vec![
+        ev_with(
+            "a",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            EventKind::PrCreated,
+            "acme/api",
+            "alice",
+            "alpha",
+        ),
+        ev_with(
+            "b",
+            Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
+            EventKind::PrCreated,
+            "acme/api",
+            "alice",
+            "bravo",
+        ),
+        ev_with(
+            "c",
+            Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
+            EventKind::PrCreated,
+            "acme/api",
+            "alice",
+            "charlie",
+        ),
+    ]);
+    model.selected = 1;
+    model.selected_event_key = Some(model.timeline[1].event_key());
+
+    handle_input(&mut model, InputCommand::StartSearch);
+    handle_input(&mut model, InputCommand::SearchInput('c'));
+    assert!(model.selected < model.timeline.len());
+
+    handle_input(&mut model, InputCommand::ClearSearchAndFilter);
+    assert!(model.selected < model.timeline.len());
+    let expected_key = model.timeline[model.selected].event_key();
+    assert_eq!(model.selected_event_key.as_deref(), Some(expected_key.as_str()));
+}
+
+#[test]
 fn mouse_click_in_timeline_selects_row_using_offset() {
     let mut model = TuiModel::new(10);
     model.push_timeline(vec![ev(
@@ -228,7 +366,7 @@ fn mouse_click_in_timeline_selects_row_using_offset() {
     };
 
     let cmd = parse_mouse_input(click, area, &model);
-    assert_eq!(cmd, InputCommand::SelectIndex(2));
+    assert_eq!(cmd, InputCommand::SelectIndex(1));
 }
 
 #[test]

@@ -1,15 +1,15 @@
 use std::{env, fs, path::PathBuf};
 
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::str::contains;
-use tempfile::{tempdir, TempDir};
+use tempfile::tempdir;
 
 #[test]
 fn config_path_prints_binary_directory_config() {
-    let (dir, bin_path) = copy_binary_to_tempdir();
+    let dir = tempdir().unwrap();
     let expected = dir.path().join("config.toml");
 
-    let mut cmd = Command::new(&bin_path);
+    let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("config")
         .arg("path")
         .current_dir(dir.path())
@@ -21,9 +21,9 @@ fn config_path_prints_binary_directory_config() {
 
 #[test]
 fn config_open_fails_when_config_is_missing() {
-    let (dir, bin_path) = copy_binary_to_tempdir();
+    let dir = tempdir().unwrap();
 
-    let mut cmd = Command::new(&bin_path);
+    let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("config")
         .arg("open")
         .current_dir(dir.path())
@@ -34,9 +34,9 @@ fn config_open_fails_when_config_is_missing() {
 
 #[test]
 fn config_doctor_reports_missing_selected_config() {
-    let (dir, bin_path) = copy_binary_to_tempdir();
+    let dir = tempdir().unwrap();
 
-    let mut cmd = Command::new(&bin_path);
+    let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("config")
         .arg("doctor")
         .current_dir(dir.path())
@@ -49,10 +49,10 @@ fn config_doctor_reports_missing_selected_config() {
 
 #[test]
 fn config_doctor_reports_parse_error_for_invalid_selected_config() {
-    let (dir, bin_path) = copy_binary_to_tempdir();
+    let dir = tempdir().unwrap();
     fs::write(dir.path().join("config.toml"), "not = [valid").unwrap();
 
-    let mut cmd = Command::new(&bin_path);
+    let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("config")
         .arg("doctor")
         .current_dir(dir.path())
@@ -66,7 +66,7 @@ fn config_doctor_reports_parse_error_for_invalid_selected_config() {
 #[cfg(unix)]
 #[test]
 fn config_edit_alias_uses_visual_editor() {
-    let (dir, bin_path) = copy_binary_to_tempdir();
+    let dir = tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     fs::write(&config_path, "[[repositories]]\nname = \"acme/api\"\n").unwrap();
 
@@ -80,7 +80,7 @@ echo "visual:$1" > "$MARKER"
 "#,
     );
 
-    let mut cmd = Command::new(&bin_path);
+    let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("config")
         .arg("edit")
         .current_dir(dir.path())
@@ -97,7 +97,7 @@ echo "visual:$1" > "$MARKER"
 #[cfg(unix)]
 #[test]
 fn config_open_uses_editor_when_visual_fails() {
-    let (dir, bin_path) = copy_binary_to_tempdir();
+    let dir = tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     fs::write(&config_path, "[[repositories]]\nname = \"acme/api\"\n").unwrap();
 
@@ -119,7 +119,7 @@ echo "editor:$1" > "$MARKER"
 "#,
     );
 
-    let mut cmd = Command::new(&bin_path);
+    let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("config")
         .arg("open")
         .current_dir(dir.path())
@@ -136,7 +136,7 @@ echo "editor:$1" > "$MARKER"
 #[cfg(unix)]
 #[test]
 fn config_open_falls_back_to_os_default_opener() {
-    let (dir, bin_path) = copy_binary_to_tempdir();
+    let dir = tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     fs::write(&config_path, "[[repositories]]\nname = \"acme/api\"\n").unwrap();
 
@@ -155,7 +155,7 @@ echo "os:$1" > "$MARKER"
     composed.push(if cfg!(windows) { ";" } else { ":" });
     composed.push(old_path);
 
-    let mut cmd = Command::new(&bin_path);
+    let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("config")
         .arg("open")
         .current_dir(dir.path())
@@ -168,28 +168,6 @@ echo "os:$1" > "$MARKER"
 
     let got = fs::read_to_string(&marker).unwrap();
     assert_marker_path(&got, "os:", &config_path);
-}
-
-fn copy_binary_to_tempdir() -> (TempDir, PathBuf) {
-    let dir = tempdir().unwrap();
-    let src = assert_cmd::cargo::cargo_bin!("gh-watch");
-    let bin_name = if cfg!(windows) {
-        "gh-watch.exe"
-    } else {
-        "gh-watch"
-    };
-    let dst = dir.path().join(bin_name);
-    fs::copy(src, &dst).unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = fs::metadata(&dst).unwrap().permissions();
-        perm.set_mode(0o755);
-        fs::set_permissions(&dst, perm).unwrap();
-    }
-
-    (dir, dst)
 }
 
 #[cfg(unix)]

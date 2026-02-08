@@ -12,21 +12,55 @@ fn config_path_prints_binary_directory_config() {
     let mut cmd = Command::new(&bin_path);
     cmd.arg("config")
         .arg("path")
+        .current_dir(dir.path())
         .assert()
         .success()
-        .stdout(contains(expected.to_string_lossy().to_string()));
+        .stdout(contains(expected.to_string_lossy().to_string()))
+        .stdout(contains("source: ./config.toml"));
 }
 
 #[test]
 fn config_open_fails_when_config_is_missing() {
-    let (_dir, bin_path) = copy_binary_to_tempdir();
+    let (dir, bin_path) = copy_binary_to_tempdir();
 
     let mut cmd = Command::new(&bin_path);
     cmd.arg("config")
         .arg("open")
+        .current_dir(dir.path())
         .assert()
         .failure()
-        .stderr(contains("run `gh-watch init` first"));
+        .stderr(contains("run `gh-watch init`"));
+}
+
+#[test]
+fn config_doctor_reports_missing_selected_config() {
+    let (dir, bin_path) = copy_binary_to_tempdir();
+
+    let mut cmd = Command::new(&bin_path);
+    cmd.arg("config")
+        .arg("doctor")
+        .current_dir(dir.path())
+        .env_remove("GH_WATCH_CONFIG")
+        .assert()
+        .success()
+        .stdout(contains("selected:"))
+        .stdout(contains("next: run `gh-watch init`"));
+}
+
+#[test]
+fn config_doctor_reports_parse_error_for_invalid_selected_config() {
+    let (dir, bin_path) = copy_binary_to_tempdir();
+    fs::write(dir.path().join("config.toml"), "not = [valid").unwrap();
+
+    let mut cmd = Command::new(&bin_path);
+    cmd.arg("config")
+        .arg("doctor")
+        .current_dir(dir.path())
+        .env_remove("GH_WATCH_CONFIG")
+        .assert()
+        .success()
+        .stdout(contains("doctor: selected config has errors"))
+        .stdout(contains("parse=error"));
 }
 
 #[cfg(unix)]
@@ -49,6 +83,7 @@ echo "visual:$1" > "$MARKER"
     let mut cmd = Command::new(&bin_path);
     cmd.arg("config")
         .arg("edit")
+        .current_dir(dir.path())
         .env("VISUAL", &visual)
         .env_remove("EDITOR")
         .env("MARKER", &marker)
@@ -56,7 +91,7 @@ echo "visual:$1" > "$MARKER"
         .success();
 
     let got = fs::read_to_string(&marker).unwrap();
-    assert_eq!(got.trim(), format!("visual:{}", config_path.display()));
+    assert_marker_path(&got, "visual:", &config_path);
 }
 
 #[cfg(unix)]
@@ -87,6 +122,7 @@ echo "editor:$1" > "$MARKER"
     let mut cmd = Command::new(&bin_path);
     cmd.arg("config")
         .arg("open")
+        .current_dir(dir.path())
         .env("VISUAL", &visual)
         .env("EDITOR", &editor)
         .env("MARKER", &marker)
@@ -94,7 +130,7 @@ echo "editor:$1" > "$MARKER"
         .success();
 
     let got = fs::read_to_string(&marker).unwrap();
-    assert_eq!(got.trim(), format!("editor:{}", config_path.display()));
+    assert_marker_path(&got, "editor:", &config_path);
 }
 
 #[cfg(unix)]
@@ -122,6 +158,7 @@ echo "os:$1" > "$MARKER"
     let mut cmd = Command::new(&bin_path);
     cmd.arg("config")
         .arg("open")
+        .current_dir(dir.path())
         .env_remove("VISUAL")
         .env_remove("EDITOR")
         .env("MARKER", &marker)
@@ -130,7 +167,7 @@ echo "os:$1" > "$MARKER"
         .success();
 
     let got = fs::read_to_string(&marker).unwrap();
-    assert_eq!(got.trim(), format!("os:{}", config_path.display()));
+    assert_marker_path(&got, "os:", &config_path);
 }
 
 fn copy_binary_to_tempdir() -> (TempDir, PathBuf) {
@@ -176,4 +213,16 @@ fn opener_script_path(base: &std::path::Path) -> PathBuf {
     }
     #[allow(unreachable_code)]
     base.join("open")
+}
+
+fn assert_marker_path(raw: &str, prefix: &str, expected: &PathBuf) {
+    let trimmed = raw.trim();
+    assert!(
+        trimmed.starts_with(prefix),
+        "marker should start with {prefix}, got {trimmed}"
+    );
+    let actual = trimmed.trim_start_matches(prefix);
+    let actual = fs::canonicalize(actual).unwrap();
+    let expected = fs::canonicalize(expected).unwrap();
+    assert_eq!(actual, expected);
 }

@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    fmt::{Display, Formatter},
     path::{Path, PathBuf},
 };
 
@@ -23,6 +24,43 @@ pub struct Config {
     pub notifications: NotificationConfig,
     #[serde(default)]
     pub poll: PollConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedConfig {
+    pub config: Config,
+    pub resolved_path: ResolvedConfigPath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConfigPath {
+    pub path: PathBuf,
+    pub source: ConfigPathSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigPathSource {
+    ExplicitArg,
+    EnvironmentVariable,
+    CurrentDirectory,
+    BinaryDirectory,
+}
+
+impl ConfigPathSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitArg => "--config",
+            Self::EnvironmentVariable => "GH_WATCH_CONFIG",
+            Self::CurrentDirectory => "./config.toml",
+            Self::BinaryDirectory => "binary-directory",
+        }
+    }
+}
+
+impl Display for ConfigPathSource {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,23 +139,84 @@ pub fn parse_config(src: &str) -> Result<Config> {
 }
 
 pub fn load_config(path: Option<&Path>) -> Result<Config> {
-    let config_path = resolve_config_path(path)?;
+    let loaded = load_config_with_path(path)?;
+    Ok(loaded.config)
+}
 
-    let src = fs::read_to_string(&config_path).with_context(|| {
+pub fn load_config_with_path(path: Option<&Path>) -> Result<LoadedConfig> {
+    let resolved_path = resolve_config_path_with_source(path)?;
+    let src = fs::read_to_string(&resolved_path.path).with_context(|| {
         format!(
-            "failed to read config: {} (run `gh-watch init` to create it, or pass `--config <path>`)",
-            config_path.display()
+            "failed to read config: {} (source: {}, run `gh-watch init` to create it, use `gh-watch config open`, or pass `--config <path>`)",
+            resolved_path.path.display(),
+            resolved_path.source
         )
     })?;
-    parse_config(&src)
+    let config = parse_config(&src)?;
+    Ok(LoadedConfig {
+        config,
+        resolved_path,
+    })
 }
 
 pub fn resolve_config_path(path: Option<&Path>) -> Result<PathBuf> {
+    Ok(resolve_config_path_with_source(path)?.path)
+}
+
+pub fn resolve_config_path_with_source(path: Option<&Path>) -> Result<ResolvedConfigPath> {
     if let Some(explicit) = path {
-        return Ok(explicit.to_path_buf());
+        return Ok(ResolvedConfigPath {
+            path: explicit.to_path_buf(),
+            source: ConfigPathSource::ExplicitArg,
+        });
     }
 
-    installed_config_path()
+    if let Some(from_env) = gh_watch_config_path_from_env() {
+        return Ok(ResolvedConfigPath {
+            path: from_env,
+            source: ConfigPathSource::EnvironmentVariable,
+        });
+    }
+
+    let cwd_path = current_directory_config_path()?;
+    if cwd_path.exists() {
+        return Ok(ResolvedConfigPath {
+            path: cwd_path,
+            source: ConfigPathSource::CurrentDirectory,
+        });
+    }
+
+    let installed = installed_config_path()?;
+    if installed.exists() {
+        return Ok(ResolvedConfigPath {
+            path: installed,
+            source: ConfigPathSource::BinaryDirectory,
+        });
+    }
+
+    Ok(ResolvedConfigPath {
+        path: cwd_path,
+        source: ConfigPathSource::CurrentDirectory,
+    })
+}
+
+pub fn resolution_candidates() -> Result<Vec<ResolvedConfigPath>> {
+    let mut candidates = Vec::new();
+    if let Some(from_env) = gh_watch_config_path_from_env() {
+        candidates.push(ResolvedConfigPath {
+            path: from_env,
+            source: ConfigPathSource::EnvironmentVariable,
+        });
+    }
+    candidates.push(ResolvedConfigPath {
+        path: current_directory_config_path()?,
+        source: ConfigPathSource::CurrentDirectory,
+    });
+    candidates.push(ResolvedConfigPath {
+        path: installed_config_path()?,
+        source: ConfigPathSource::BinaryDirectory,
+    });
+    Ok(candidates)
 }
 
 pub fn installed_config_path() -> Result<PathBuf> {
@@ -129,6 +228,19 @@ pub fn installed_config_path() -> Result<PathBuf> {
         )
     })?;
     Ok(dir.join("config.toml"))
+}
+
+fn gh_watch_config_path_from_env() -> Option<PathBuf> {
+    let raw = env::var_os("GH_WATCH_CONFIG")?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw))
+}
+
+fn current_directory_config_path() -> Result<PathBuf> {
+    let cwd = env::current_dir().context("could not determine current working directory")?;
+    Ok(cwd.join("config.toml"))
 }
 
 pub fn default_state_db_path() -> Result<PathBuf> {

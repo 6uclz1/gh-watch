@@ -1,9 +1,14 @@
 use std::{
     env,
+    fs,
+    path::Path,
     sync::{Mutex, OnceLock},
 };
 
-use gh_watch::config::{parse_config, resolve_config_path};
+use gh_watch::config::{
+    parse_config, resolve_config_path, resolve_config_path_with_source, ConfigPathSource,
+};
+use tempfile::tempdir;
 
 #[test]
 fn parse_config_rejects_invalid_repo_name() {
@@ -83,43 +88,109 @@ name = "octocat/hello-world"
 fn resolve_config_path_uses_explicit_path_when_provided() {
     let explicit_path = env::temp_dir().join("custom-config.toml");
     let explicit = explicit_path.as_path();
-    let resolved = resolve_config_path(Some(explicit)).expect("path should resolve");
-    assert_eq!(resolved, explicit);
+    let resolved = resolve_config_path_with_source(Some(explicit)).expect("path should resolve");
+    assert_eq!(resolved.path, explicit);
+    assert_eq!(resolved.source, ConfigPathSource::ExplicitArg);
 }
 
 #[test]
-fn resolve_config_path_defaults_to_installed_location() {
-    let resolved = resolve_config_path(None).expect("path should resolve");
-    let exe = env::current_exe().expect("current exe should resolve");
-    let expected = exe
-        .parent()
-        .expect("exe should have a parent")
-        .join("config.toml");
-    assert_eq!(resolved, expected);
+fn resolve_config_path_uses_gh_watch_config_env_before_other_candidates() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = tempdir().unwrap();
+    let env_config = dir.path().join("env-config.toml");
+    let cwd = dir.path().join("cwd");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(cwd.join("config.toml"), "[[repositories]]\nname=\"acme/repo\"\n").unwrap();
+
+    with_current_dir(&cwd, || {
+        env::set_var("GH_WATCH_CONFIG", &env_config);
+        let resolved = resolve_config_path_with_source(None).expect("path should resolve");
+        assert_eq!(resolved.path, env_config);
+        assert_eq!(resolved.source, ConfigPathSource::EnvironmentVariable);
+    });
+    env::remove_var("GH_WATCH_CONFIG");
 }
 
 #[test]
-fn resolve_config_path_ignores_gh_watch_config_env() {
-    let _guard = env_lock().lock().expect("env lock should work");
-    let prev = env::var_os("GH_WATCH_CONFIG");
-    env::set_var("GH_WATCH_CONFIG", "/tmp/legacy-config.toml");
+fn resolve_config_path_uses_cwd_when_env_is_not_set() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    env::remove_var("GH_WATCH_CONFIG");
 
-    let resolved = resolve_config_path(None).expect("path should resolve");
-    let exe = env::current_exe().expect("current exe should resolve");
-    let expected = exe
-        .parent()
-        .expect("exe should have a parent")
-        .join("config.toml");
-    assert_eq!(resolved, expected);
+    let dir = tempdir().unwrap();
+    let cwd_config = dir.path().join("config.toml");
+    fs::write(&cwd_config, "[[repositories]]\nname=\"acme/repo\"\n").unwrap();
 
-    if let Some(prev) = prev {
-        env::set_var("GH_WATCH_CONFIG", prev);
-    } else {
-        env::remove_var("GH_WATCH_CONFIG");
-    }
+    with_current_dir(dir.path(), || {
+        let resolved = resolve_config_path_with_source(None).expect("path should resolve");
+        assert_eq!(
+            fs::canonicalize(&resolved.path).unwrap(),
+            fs::canonicalize(&cwd_config).unwrap()
+        );
+        assert_eq!(resolved.source, ConfigPathSource::CurrentDirectory);
+    });
+}
+
+#[test]
+fn resolve_config_path_falls_back_to_binary_directory_when_cwd_missing() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    env::remove_var("GH_WATCH_CONFIG");
+
+    let dir = tempdir().unwrap();
+    with_current_dir(dir.path(), || {
+        struct FileRestoreGuard {
+            path: std::path::PathBuf,
+            previous: Option<String>,
+        }
+        impl Drop for FileRestoreGuard {
+            fn drop(&mut self) {
+                if let Some(previous) = &self.previous {
+                    fs::write(&self.path, previous).expect("restore config should succeed");
+                } else if self.path.exists() {
+                    fs::remove_file(&self.path).expect("cleanup config should succeed");
+                }
+            }
+        }
+
+        let expected = env::current_exe()
+            .expect("current exe should resolve")
+            .parent()
+            .expect("exe should have a parent")
+            .join("config.toml");
+
+        let _restore = FileRestoreGuard {
+            previous: fs::read_to_string(&expected).ok(),
+            path: expected.clone(),
+        };
+        fs::write(&expected, "[[repositories]]\nname=\"acme/repo\"\n").unwrap();
+
+        let resolved = resolve_config_path_with_source(None).expect("path should resolve");
+        assert_eq!(resolve_config_path(None).unwrap(), expected);
+        assert_eq!(resolved.path, expected);
+        assert_eq!(resolved.source, ConfigPathSource::BinaryDirectory);
+    });
 }
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_current_dir(path: &Path, test: impl FnOnce()) {
+    struct CwdGuard(std::path::PathBuf);
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            env::set_current_dir(&self.0).expect("restore current dir should succeed");
+        }
+    }
+
+    let previous = env::current_dir().expect("current dir should resolve");
+    let _guard = CwdGuard(previous);
+    env::set_current_dir(path).expect("set current dir should succeed");
+    test();
 }

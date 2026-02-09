@@ -85,7 +85,8 @@ fn help_lists_once_report_and_doctor_commands() {
         .success()
         .stdout(contains("once"))
         .stdout(contains("report"))
-        .stdout(contains("doctor"));
+        .stdout(contains("doctor"))
+        .stdout(contains("notification-test"));
 }
 
 #[test]

@@ -77,10 +77,13 @@ gh-watch watch
 - `gh-watch report [--config <path>] [--since <duration>] [--format markdown|json]`
 - `gh-watch doctor [--config <path>]`
 - `gh-watch check [--config <path>]`
+- `gh-watch notification-test`
 - `gh-watch init [--path <path>] [--force] [--interactive] [--reset-state]`
 - `gh-watch config open|edit`
 - `gh-watch config path`
 - `gh-watch config doctor`
+
+`notification-test` は notifier の送信関数を直接呼び出して、デバッグ用に通知を1回送信します。
 
 ### `once` の終了コード
 

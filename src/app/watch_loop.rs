@@ -10,10 +10,13 @@ use crate::{
     app::poll_once::{poll_once, PollOutcome},
     config::Config,
     ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
-    ui::tui::{handle_input, parse_input, parse_mouse_input, InputCommand, TerminalUi, TuiModel},
+    ui::tui::{
+        handle_input, parse_input, parse_mouse_input, ActiveTab, InputCommand, TerminalUi, TuiModel,
+    },
 };
 
 const SPINNER_REDRAW_INTERVAL_MS: u64 = 120;
+const ESC_DOUBLE_PRESS_WINDOW_MS: i64 = 1500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopControl {
@@ -92,19 +95,27 @@ where
 {
     match maybe_event {
         Some(Ok(Event::Key(key))) => {
-            let cmd = if model.search_mode {
-                match key.code {
-                    crossterm::event::KeyCode::Esc => InputCommand::ClearSearchAndFilter,
-                    crossterm::event::KeyCode::Enter => InputCommand::FinishSearch,
-                    crossterm::event::KeyCode::Backspace => InputCommand::SearchBackspace,
-                    crossterm::event::KeyCode::Char(c) => InputCommand::SearchInput(c),
-                    _ => parse_input(key),
-                }
-            } else {
-                parse_input(key)
-            };
+            let cmd = parse_input(key);
+            if cmd != InputCommand::EscapePressed {
+                model.esc_armed_until = None;
+            }
+
             match cmd {
                 InputCommand::Quit => LoopControl::Quit,
+                InputCommand::EscapePressed => {
+                    let now = clock.now();
+                    if model
+                        .esc_armed_until
+                        .is_some_and(|armed_until| now <= armed_until)
+                    {
+                        LoopControl::Quit
+                    } else {
+                        model.esc_armed_until =
+                            Some(now + chrono::Duration::milliseconds(ESC_DOUBLE_PRESS_WINDOW_MS));
+                        model.status_line = "press Esc again to quit (1.5s)".to_string();
+                        LoopControl::Redraw
+                    }
+                }
                 InputCommand::Refresh => LoopControl::RequestPoll,
                 InputCommand::OpenSelectedUrl => {
                     let Some(url) = model
@@ -126,16 +137,7 @@ where
                     mark_selected_event_read(model, state, clock);
                     LoopControl::Redraw
                 }
-                InputCommand::ToggleHelp => {
-                    handle_input(model, cmd);
-                    LoopControl::Redraw
-                }
-                InputCommand::StartSearch
-                | InputCommand::SearchInput(_)
-                | InputCommand::SearchBackspace
-                | InputCommand::FinishSearch
-                | InputCommand::CycleKindFilter
-                | InputCommand::ClearSearchAndFilter => {
+                InputCommand::ToggleHelp | InputCommand::NextTab | InputCommand::PrevTab => {
                     handle_input(model, cmd);
                     LoopControl::Redraw
                 }
@@ -147,7 +149,9 @@ where
                 | InputCommand::JumpBottom
                 | InputCommand::SelectIndex(_) => {
                     handle_input(model, cmd);
-                    mark_selected_event_read(model, state, clock);
+                    if model.active_tab == ActiveTab::Timeline {
+                        mark_selected_event_read(model, state, clock);
+                    }
                     LoopControl::Redraw
                 }
                 InputCommand::None => LoopControl::Continue,
@@ -160,7 +164,9 @@ where
                 | InputCommand::ScrollDown
                 | InputCommand::SelectIndex(_) => {
                     handle_input(model, cmd);
-                    mark_selected_event_read(model, state, clock);
+                    if model.active_tab == ActiveTab::Timeline {
+                        mark_selected_event_read(model, state, clock);
+                    }
                     LoopControl::Redraw
                 }
                 _ => LoopControl::Continue,
@@ -416,7 +422,7 @@ mod tests {
         config::{Config, FiltersConfig, NotificationConfig, PollConfig, RepositoryConfig},
         domain::events::{EventKind, WatchEvent},
         ports::{ClockPort, StateStorePort},
-        ui::tui::TuiModel,
+        ui::tui::{ActiveTab, TuiModel},
     };
 
     #[derive(Clone, Default)]
@@ -632,6 +638,132 @@ mod tests {
     }
 
     #[test]
+    fn esc_first_press_arms_quit_and_requests_redraw() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 0, 0, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(key))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert_eq!(model.status_line, "press Esc again to quit (1.5s)");
+        assert_eq!(
+            model.esc_armed_until,
+            Some(clock.now + chrono::Duration::milliseconds(1500))
+        );
+    }
+
+    #[test]
+    fn esc_second_press_within_window_quits() {
+        let state = FakeState::default();
+        let first_clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 0, 0, 0).unwrap(),
+        };
+        let second_clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 0, 0, 1).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+
+        let first_press = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(
+            handle_stream_event(
+                Some(Ok(Event::Key(first_press))),
+                &mut model,
+                &state,
+                &first_clock,
+                test_area(),
+                &open_ok
+            ),
+            LoopControl::Redraw
+        );
+
+        let second_press = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(second_press))),
+            &mut model,
+            &state,
+            &second_clock,
+            test_area(),
+            &open_ok,
+        );
+        assert_eq!(control, LoopControl::Quit);
+    }
+
+    #[test]
+    fn esc_second_press_after_window_rearms_without_quit() {
+        let state = FakeState::default();
+        let first_clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 0, 0, 0).unwrap(),
+        };
+        let second_clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 0, 0, 2).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+
+        let first_press = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(
+            handle_stream_event(
+                Some(Ok(Event::Key(first_press))),
+                &mut model,
+                &state,
+                &first_clock,
+                test_area(),
+                &open_ok
+            ),
+            LoopControl::Redraw
+        );
+
+        let second_press = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(second_press))),
+            &mut model,
+            &state,
+            &second_clock,
+            test_area(),
+            &open_ok,
+        );
+        assert_eq!(control, LoopControl::Redraw);
+        assert_eq!(model.status_line, "press Esc again to quit (1.5s)");
+        assert_eq!(
+            model.esc_armed_until,
+            Some(second_clock.now + chrono::Duration::milliseconds(1500))
+        );
+    }
+
+    #[test]
+    fn non_escape_key_disarms_pending_esc_quit() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 0, 0, 1).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+        model.esc_armed_until = Some(clock.now + chrono::Duration::milliseconds(500));
+
+        let key = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(key))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert!(model.esc_armed_until.is_none());
+    }
+
+    #[test]
     fn navigation_marks_selected_event_as_read() {
         let state = FakeState::default();
         let clock = FixedClock {
@@ -660,6 +792,35 @@ mod tests {
             state.marked_read_event_keys(),
             vec![model.timeline[1].event_key()]
         );
+    }
+
+    #[test]
+    fn navigation_does_not_mark_events_read_on_repositories_tab() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 9, 0, 30, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+        model.timeline = vec![
+            timeline_event("ev-nav-1", clock.now),
+            timeline_event("ev-nav-2", clock.now),
+        ];
+        model.selected = 0;
+        model.active_tab = ActiveTab::Repositories;
+
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let control = handle_stream_event(
+            Some(Ok(Event::Key(key))),
+            &mut model,
+            &state,
+            &clock,
+            test_area(),
+            &open_ok,
+        );
+
+        assert_eq!(control, LoopControl::Redraw);
+        assert_eq!(model.selected, 0);
+        assert!(state.marked_read_event_keys().is_empty());
     }
 
     #[test]

@@ -19,7 +19,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState, Wrap,
+        Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState, Tabs, Wrap,
     },
     Frame, Terminal,
 };
@@ -41,63 +41,54 @@ pub enum InputCommand {
     ToggleHelp,
     Refresh,
     OpenSelectedUrl,
-    StartSearch,
-    SearchInput(char),
-    SearchBackspace,
-    FinishSearch,
-    CycleKindFilter,
-    ClearSearchAndFilter,
+    NextTab,
+    PrevTab,
+    EscapePressed,
     Quit,
     None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimelineKindFilter {
-    PrCreated,
-    IssueCreated,
-    IssueCommentCreated,
-    PrReviewCommentCreated,
-    PrReviewRequested,
-    PrReviewSubmitted,
-    PrMerged,
+pub enum ActiveTab {
+    Timeline,
+    Repositories,
 }
 
-impl TimelineKindFilter {
-    fn label(&self) -> &'static str {
+impl ActiveTab {
+    fn next(self) -> Self {
         match self {
-            Self::PrCreated => "PR",
-            Self::IssueCreated => "ISSUE",
-            Self::IssueCommentCreated => "I-CMT",
-            Self::PrReviewCommentCreated => "PR-CMT",
-            Self::PrReviewRequested => "PR-REQ",
-            Self::PrReviewSubmitted => "PR-REV",
-            Self::PrMerged => "PR-MRG",
+            Self::Timeline => Self::Repositories,
+            Self::Repositories => Self::Timeline,
         }
     }
 
-    fn matches(&self, kind: &EventKind) -> bool {
+    fn prev(self) -> Self {
         match self {
-            Self::PrCreated => matches!(kind, EventKind::PrCreated),
-            Self::IssueCreated => matches!(kind, EventKind::IssueCreated),
-            Self::IssueCommentCreated => matches!(kind, EventKind::IssueCommentCreated),
-            Self::PrReviewCommentCreated => matches!(kind, EventKind::PrReviewCommentCreated),
-            Self::PrReviewRequested => matches!(kind, EventKind::PrReviewRequested),
-            Self::PrReviewSubmitted => matches!(kind, EventKind::PrReviewSubmitted),
-            Self::PrMerged => matches!(kind, EventKind::PrMerged),
+            Self::Timeline => Self::Repositories,
+            Self::Repositories => Self::Timeline,
         }
     }
 
-    fn next(self) -> Option<Self> {
+    fn index(self) -> usize {
         match self {
-            Self::PrCreated => Some(Self::IssueCreated),
-            Self::IssueCreated => Some(Self::IssueCommentCreated),
-            Self::IssueCommentCreated => Some(Self::PrReviewCommentCreated),
-            Self::PrReviewCommentCreated => Some(Self::PrReviewRequested),
-            Self::PrReviewRequested => Some(Self::PrReviewSubmitted),
-            Self::PrReviewSubmitted => Some(Self::PrMerged),
-            Self::PrMerged => None,
+            Self::Timeline => 0,
+            Self::Repositories => 1,
         }
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Timeline => "Timeline",
+            Self::Repositories => "Repositories",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineColumnMode {
+    Full,
+    Compact,
+    TitleOnly,
 }
 
 #[derive(Debug, Clone)]
@@ -119,9 +110,8 @@ pub struct TuiModel {
     pub is_polling: bool,
     pub poll_started_at: Option<DateTime<Utc>>,
     pub queued_refresh: bool,
-    pub search_mode: bool,
-    pub search_query: String,
-    pub kind_filter: Option<TimelineKindFilter>,
+    pub active_tab: ActiveTab,
+    pub esc_armed_until: Option<DateTime<Utc>>,
     limit: usize,
 }
 
@@ -145,9 +135,8 @@ impl TuiModel {
             is_polling: false,
             poll_started_at: None,
             queued_refresh: false,
-            search_mode: false,
-            search_query: String::new(),
-            kind_filter: None,
+            active_tab: ActiveTab::Timeline,
+            esc_armed_until: None,
             limit,
         }
     }
@@ -194,29 +183,7 @@ impl TuiModel {
     }
 
     fn rebuild_timeline(&mut self, previous_selected_key: Option<String>) {
-        let query = self.search_query.to_ascii_lowercase();
-        self.timeline = self
-            .timeline_all
-            .iter()
-            .filter(|event| {
-                if let Some(kind_filter) = self.kind_filter {
-                    if !kind_filter.matches(&event.kind) {
-                        return false;
-                    }
-                }
-
-                if query.is_empty() {
-                    return true;
-                }
-
-                let repo = event.repo.to_ascii_lowercase();
-                let actor = event.actor.to_ascii_lowercase();
-                let title = event.title.to_ascii_lowercase();
-                repo.contains(&query) || actor.contains(&query) || title.contains(&query)
-            })
-            .cloned()
-            .collect();
-
+        self.timeline = self.timeline_all.clone();
         self.restore_selection(previous_selected_key);
     }
 
@@ -241,36 +208,6 @@ impl TuiModel {
         self.sync_selected_event_key();
     }
 
-    fn cycle_kind_filter(&mut self) {
-        let previous_selected_key = self.snapshot_selected_key();
-        self.kind_filter = match self.kind_filter {
-            None => Some(TimelineKindFilter::PrCreated),
-            Some(kind) => kind.next(),
-        };
-        self.rebuild_timeline(previous_selected_key);
-    }
-
-    fn clear_search_and_filter(&mut self) {
-        let previous_selected_key = self.snapshot_selected_key();
-        self.search_mode = false;
-        self.search_query.clear();
-        self.kind_filter = None;
-        self.rebuild_timeline(previous_selected_key);
-    }
-
-    fn push_search_char(&mut self, c: char) {
-        let previous_selected_key = self.snapshot_selected_key();
-        self.search_mode = true;
-        self.search_query.push(c);
-        self.rebuild_timeline(previous_selected_key);
-    }
-
-    fn pop_search_char(&mut self) {
-        let previous_selected_key = self.snapshot_selected_key();
-        self.search_query.pop();
-        self.rebuild_timeline(previous_selected_key);
-    }
-
     fn sync_selected_event_key(&mut self) {
         self.selected_event_key = self.timeline.get(self.selected).map(WatchEvent::event_key);
     }
@@ -284,11 +221,10 @@ pub fn parse_input(key: KeyEvent) -> InputCommand {
     match key.code {
         KeyCode::Char('q') => InputCommand::Quit,
         KeyCode::Char('r') => InputCommand::Refresh,
-        KeyCode::Char('/') => InputCommand::StartSearch,
-        KeyCode::Char('f') => InputCommand::CycleKindFilter,
         KeyCode::Char('?') => InputCommand::ToggleHelp,
-        KeyCode::Esc => InputCommand::ClearSearchAndFilter,
-        KeyCode::Backspace => InputCommand::SearchBackspace,
+        KeyCode::Tab => InputCommand::NextTab,
+        KeyCode::BackTab => InputCommand::PrevTab,
+        KeyCode::Esc => InputCommand::EscapePressed,
         KeyCode::Enter => InputCommand::OpenSelectedUrl,
         KeyCode::Up | KeyCode::Char('k') => InputCommand::ScrollUp,
         KeyCode::Down | KeyCode::Char('j') => InputCommand::ScrollDown,
@@ -301,6 +237,10 @@ pub fn parse_input(key: KeyEvent) -> InputCommand {
 }
 
 pub fn parse_mouse_input(mouse: MouseEvent, terminal_area: Rect, model: &TuiModel) -> InputCommand {
+    if model.active_tab != ActiveTab::Timeline {
+        return InputCommand::None;
+    }
+
     let timeline_inner = timeline_inner_area(terminal_area);
     if !contains_point(timeline_inner, mouse.column, mouse.row) {
         return InputCommand::None;
@@ -332,57 +272,47 @@ pub fn parse_mouse_input(mouse: MouseEvent, terminal_area: Rect, model: &TuiMode
 
 pub fn handle_input(model: &mut TuiModel, command: InputCommand) {
     match command {
-        InputCommand::StartSearch => {
-            model.search_mode = true;
-        }
-        InputCommand::SearchInput(c) => {
-            model.push_search_char(c);
-        }
-        InputCommand::SearchBackspace => {
-            model.pop_search_char();
-        }
-        InputCommand::FinishSearch => {
-            model.search_mode = false;
-        }
-        InputCommand::CycleKindFilter => {
-            model.cycle_kind_filter();
-        }
-        InputCommand::ClearSearchAndFilter => {
-            model.clear_search_and_filter();
-        }
         InputCommand::ToggleHelp => {
             model.help_visible = !model.help_visible;
         }
+        InputCommand::NextTab => {
+            model.active_tab = model.active_tab.next();
+        }
+        InputCommand::PrevTab => {
+            model.active_tab = model.active_tab.prev();
+        }
         InputCommand::ScrollUp => {
-            model.selected = model.selected.saturating_sub(1);
+            if model.active_tab == ActiveTab::Timeline {
+                model.selected = model.selected.saturating_sub(1);
+            }
         }
         InputCommand::ScrollDown => {
-            if !model.timeline.is_empty() {
+            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
                 model.selected = (model.selected + 1).min(model.timeline.len() - 1);
             }
         }
         InputCommand::PageUp => {
-            if !model.timeline.is_empty() {
+            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
                 model.selected = model.selected.saturating_sub(model.page_size());
             }
         }
         InputCommand::PageDown => {
-            if !model.timeline.is_empty() {
+            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
                 model.selected = (model.selected + model.page_size()).min(model.timeline.len() - 1);
             }
         }
         InputCommand::JumpTop => {
-            if !model.timeline.is_empty() {
+            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
                 model.selected = 0;
             }
         }
         InputCommand::JumpBottom => {
-            if !model.timeline.is_empty() {
+            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
                 model.selected = model.timeline.len() - 1;
             }
         }
         InputCommand::SelectIndex(index) => {
-            if !model.timeline.is_empty() {
+            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
                 model.selected = index.min(model.timeline.len() - 1);
             }
         }
@@ -398,7 +328,8 @@ pub fn handle_input(model: &mut TuiModel, command: InputCommand) {
             | InputCommand::JumpTop
             | InputCommand::JumpBottom
             | InputCommand::SelectIndex(_)
-    ) {
+    ) && model.active_tab == ActiveTab::Timeline
+    {
         model.sync_selected_event_key();
     }
 }
@@ -439,22 +370,17 @@ impl Drop for TerminalUi {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct UiLayout {
+    status: Rect,
+    tabs: Rect,
+    content: Rect,
+    selected: Rect,
+    keys: Rect,
+}
+
 fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
-    let vertical_areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(8),
-            Constraint::Min(5),
-            Constraint::Length(5),
-            Constraint::Length(3),
-        ])
-        .split(frame.area());
-    let main_areas = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(vertical_areas[1]);
-    let timeline_inner = shrink_by_border(main_areas[0]);
-    model.timeline_page_size = (timeline_inner.height as usize).saturating_sub(1).max(1);
+    let layout = ui_layout(frame.area());
 
     let last_success = format_status_time(model.last_success_at);
     let next_poll = format_status_time(model.next_poll_at);
@@ -472,88 +398,44 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(format!(
-            "status={} | failures={}",
-            model.status_line, model.failure_count
+            "status={} | failures={} | tab={}",
+            model.status_line,
+            model.failure_count,
+            model.active_tab.label()
+        )),
+        Line::from(format!(
+            "watching={} | {}",
+            model.watched_repositories.len(),
+            summarize_watched_repositories(&model.watched_repositories)
         )),
         Line::from(build_loading_status_line(model, Utc::now())),
         Line::from(format!(
             "last_success={} | next_poll={}",
             last_success, next_poll
         )),
-        Line::from(build_filter_status_line(model)),
         Line::from(format!("latest_failure={latest_failure}")),
     ])
     .block(Block::default().borders(Borders::ALL).title("Status"));
-    frame.render_widget(header, vertical_areas[0]);
+    frame.render_widget(header, layout.status);
 
-    let rows = if model.timeline.is_empty() {
-        vec![Row::new(vec![
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("No events yet"),
-        ])]
-    } else {
-        model
-            .timeline
-            .iter()
-            .map(|event| timeline_row(event, model.is_event_read(&event.event_key())))
-            .collect()
-    };
+    let tab_titles = ["Timeline", "Repositories"]
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let tabs = Tabs::new(tab_titles)
+        .select(model.active_tab.index())
+        .block(Block::default().borders(Borders::ALL).title("View"))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_widget(tabs, layout.tabs);
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(1),
-            Constraint::Length(14),
-            Constraint::Length(8),
-            Constraint::Length(22),
-            Constraint::Length(16),
-            Constraint::Min(12),
-        ],
-    )
-    .header(
-        Row::new(vec!["N", "Time(UTC)", "Type", "Repo", "Actor", "Title"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-    )
-    .block(Block::default().borders(Borders::ALL).title("Timeline"))
-    .row_highlight_style(Style::default().bg(Color::DarkGray))
-    .highlight_symbol(">> ");
-
-    let mut state = TableState::default().with_offset(model.timeline_offset);
-    if model.timeline.is_empty() {
-        model.selected = 0;
-        model.timeline_offset = 0;
-        model.selected_event_key = None;
-    } else {
-        model.selected = model.selected.min(model.timeline.len() - 1);
-        model.sync_selected_event_key();
-        state.select(Some(model.selected));
+    match model.active_tab {
+        ActiveTab::Timeline => render_timeline_panel(frame, model, layout.content),
+        ActiveTab::Repositories => render_repositories_panel(frame, model, layout.content),
     }
-    frame.render_stateful_widget(table, main_areas[0], &mut state);
-    model.timeline_offset = if model.timeline.is_empty() {
-        0
-    } else {
-        state.offset()
-    };
-
-    let repo_items = if model.watched_repositories.is_empty() {
-        vec![ListItem::new("No enabled repositories")]
-    } else {
-        model
-            .watched_repositories
-            .iter()
-            .map(|repo| ListItem::new(repo.clone()))
-            .collect()
-    };
-    let repo_list = List::new(repo_items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Watching Repositories"),
-    );
-    frame.render_widget(repo_list, main_areas[1]);
 
     let selected_text = model
         .timeline
@@ -582,7 +464,7 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
         });
     let selected = Paragraph::new(selected_text)
         .block(Block::default().borders(Borders::ALL).title("Selected"));
-    frame.render_widget(selected, vertical_areas[2]);
+    frame.render_widget(selected, layout.selected);
 
     let loading_hint = if model.is_polling {
         "loading: move/help/open available, r queues next refresh"
@@ -591,15 +473,167 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     };
     let keys = Paragraph::new(vec![
         Line::from(
-            "q quit | r refresh | / search | f kind filter | Esc clear filters | ? help | Enter open",
+            "q quit | Esc x2 quit (1.5s) | r refresh | Tab/Shift+Tab switch | ? help | Enter open",
         ),
+        Line::from("arrows/jk page/home/end move timeline (Timeline tab only)"),
         Line::from(loading_hint),
     ])
     .block(Block::default().borders(Borders::ALL).title("Keys"));
-    frame.render_widget(keys, vertical_areas[3]);
+    frame.render_widget(keys, layout.keys);
 
     if model.help_visible {
         render_help_overlay(frame);
+    }
+}
+
+fn render_timeline_panel(frame: &mut Frame<'_>, model: &mut TuiModel, area: Rect) {
+    let timeline_inner = shrink_by_border(area);
+    model.timeline_page_size = (timeline_inner.height as usize).saturating_sub(1).max(1);
+
+    let mode = timeline_column_mode(area.width);
+    let rows = if model.timeline.is_empty() {
+        vec![timeline_empty_row(mode)]
+    } else {
+        model
+            .timeline
+            .iter()
+            .map(|event| timeline_row(event, model.is_event_read(&event.event_key()), mode))
+            .collect()
+    };
+
+    let table = Table::new(rows, timeline_constraints(mode))
+        .header(timeline_header(mode).style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title("Timeline"))
+        .row_highlight_style(Style::default().bg(Color::DarkGray))
+        .highlight_symbol(">> ");
+
+    let mut state = TableState::default().with_offset(model.timeline_offset);
+    if model.timeline.is_empty() {
+        model.selected = 0;
+        model.timeline_offset = 0;
+        model.selected_event_key = None;
+    } else {
+        model.selected = model.selected.min(model.timeline.len() - 1);
+        model.sync_selected_event_key();
+        state.select(Some(model.selected));
+    }
+    frame.render_stateful_widget(table, area, &mut state);
+    model.timeline_offset = if model.timeline.is_empty() {
+        0
+    } else {
+        state.offset()
+    };
+}
+
+fn render_repositories_panel(frame: &mut Frame<'_>, model: &mut TuiModel, area: Rect) {
+    let repo_items = if model.watched_repositories.is_empty() {
+        vec![ListItem::new("No enabled repositories")]
+    } else {
+        model
+            .watched_repositories
+            .iter()
+            .map(|repo| ListItem::new(repo.clone()))
+            .collect()
+    };
+    let repo_list =
+        List::new(repo_items).block(Block::default().borders(Borders::ALL).title("Repositories"));
+    frame.render_widget(repo_list, area);
+}
+
+fn ui_layout(area: Rect) -> UiLayout {
+    let vertical_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(8),
+            Constraint::Min(5),
+            Constraint::Length(5),
+            Constraint::Length(4),
+        ])
+        .split(area);
+
+    let main_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(vertical_areas[1]);
+
+    UiLayout {
+        status: vertical_areas[0],
+        tabs: main_areas[0],
+        content: main_areas[1],
+        selected: vertical_areas[2],
+        keys: vertical_areas[3],
+    }
+}
+
+fn timeline_column_mode(width: u16) -> TimelineColumnMode {
+    if width >= 115 {
+        TimelineColumnMode::Full
+    } else if width >= 100 {
+        TimelineColumnMode::Compact
+    } else {
+        TimelineColumnMode::TitleOnly
+    }
+}
+
+fn timeline_constraints(mode: TimelineColumnMode) -> Vec<Constraint> {
+    match mode {
+        TimelineColumnMode::Full => vec![
+            Constraint::Length(1),
+            Constraint::Length(14),
+            Constraint::Length(8),
+            Constraint::Length(22),
+            Constraint::Length(16),
+            Constraint::Min(12),
+        ],
+        TimelineColumnMode::Compact => vec![
+            Constraint::Length(1),
+            Constraint::Length(14),
+            Constraint::Length(8),
+            Constraint::Length(22),
+            Constraint::Min(12),
+        ],
+        TimelineColumnMode::TitleOnly => vec![
+            Constraint::Length(1),
+            Constraint::Length(14),
+            Constraint::Length(8),
+            Constraint::Min(12),
+        ],
+    }
+}
+
+fn timeline_header(mode: TimelineColumnMode) -> Row<'static> {
+    match mode {
+        TimelineColumnMode::Full => {
+            Row::new(vec!["N", "Time(UTC)", "Type", "Repo", "Actor", "Title"])
+        }
+        TimelineColumnMode::Compact => Row::new(vec!["N", "Time(UTC)", "Type", "Repo", "Title"]),
+        TimelineColumnMode::TitleOnly => Row::new(vec!["N", "Time(UTC)", "Type", "Title"]),
+    }
+}
+
+fn timeline_empty_row(mode: TimelineColumnMode) -> Row<'static> {
+    match mode {
+        TimelineColumnMode::Full => Row::new(vec![
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("No events yet"),
+        ]),
+        TimelineColumnMode::Compact => Row::new(vec![
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("No events yet"),
+        ]),
+        TimelineColumnMode::TitleOnly => Row::new(vec![
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("No events yet"),
+        ]),
     }
 }
 
@@ -644,18 +678,42 @@ fn unread_marker(is_read: bool) -> &'static str {
     }
 }
 
-fn timeline_row(event: &WatchEvent, is_read: bool) -> Row<'static> {
-    Row::new(vec![
-        Cell::from(unread_marker(is_read)),
-        Cell::from(format_timeline_time(event.created_at)),
-        Cell::from(Span::styled(
-            event_kind_label(&event.kind),
-            event_kind_style(&event.kind),
-        )),
-        Cell::from(truncate_tail(&event.repo, 22)),
-        Cell::from(truncate_tail(&format!("@{}", event.actor), 16)),
-        Cell::from(truncate_tail(&event.title, 96)),
-    ])
+fn timeline_row(event: &WatchEvent, is_read: bool, mode: TimelineColumnMode) -> Row<'static> {
+    match mode {
+        TimelineColumnMode::Full => Row::new(vec![
+            Cell::from(unread_marker(is_read)),
+            Cell::from(format_timeline_time(event.created_at)),
+            Cell::from(Span::styled(
+                event_kind_label(&event.kind),
+                event_kind_style(&event.kind),
+            )),
+            Cell::from(truncate_tail(&event.repo, 22)),
+            Cell::from(truncate_tail(&format!("@{}", event.actor), 16)),
+            Cell::from(truncate_tail(&event.title, 96)),
+        ]),
+        TimelineColumnMode::Compact => Row::new(vec![
+            Cell::from(unread_marker(is_read)),
+            Cell::from(format_timeline_time(event.created_at)),
+            Cell::from(Span::styled(
+                event_kind_label(&event.kind),
+                event_kind_style(&event.kind),
+            )),
+            Cell::from(truncate_tail(&event.repo, 22)),
+            Cell::from(truncate_tail(&event.title, 96)),
+        ]),
+        TimelineColumnMode::TitleOnly => Row::new(vec![
+            Cell::from(unread_marker(is_read)),
+            Cell::from(format_timeline_time(event.created_at)),
+            Cell::from(Span::styled(
+                event_kind_label(&event.kind),
+                event_kind_style(&event.kind),
+            )),
+            Cell::from(truncate_tail(
+                &format!("{} | {}", event.repo, event.title),
+                120,
+            )),
+        ]),
+    }
 }
 
 fn truncate_tail(raw: &str, max_chars: usize) -> String {
@@ -696,24 +754,6 @@ fn build_loading_status_line(model: &TuiModel, now: DateTime<Utc>) -> String {
     format!("loading=on {spinner} {elapsed_secs}s | refresh={refresh}")
 }
 
-fn build_filter_status_line(model: &TuiModel) -> String {
-    let search = if model.search_query.is_empty() {
-        "-".to_string()
-    } else {
-        model.search_query.clone()
-    };
-    let kind = model
-        .kind_filter
-        .map(|kind| kind.label().to_string())
-        .unwrap_or_else(|| "ALL".to_string());
-    let mode = if model.search_mode {
-        "search"
-    } else {
-        "browse"
-    };
-    format!("filters: search={search} | kind={kind} | mode={mode}")
-}
-
 fn spinner_frame(elapsed_secs: i64) -> char {
     const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
     FRAMES[(elapsed_secs.rem_euclid(FRAMES.len() as i64)) as usize]
@@ -734,22 +774,21 @@ fn summarize_failure(failure: &FailureRecord) -> String {
     )
 }
 
-fn timeline_inner_area(area: Rect) -> Rect {
-    let vertical_areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(8),
-            Constraint::Min(5),
-            Constraint::Length(5),
-            Constraint::Length(3),
-        ])
-        .split(area);
-    let main_areas = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(vertical_areas[1]);
+fn summarize_watched_repositories(repos: &[String]) -> String {
+    if repos.is_empty() {
+        return "none".to_string();
+    }
 
-    shrink_by_border(main_areas[0])
+    if repos.len() <= 2 {
+        return repos.join(", ");
+    }
+
+    format!("{}, {} +{}", repos[0], repos[1], repos.len() - 2)
+}
+
+fn timeline_inner_area(area: Rect) -> Rect {
+    let layout = ui_layout(area);
+    shrink_by_border(layout.content)
 }
 
 fn shrink_by_border(area: Rect) -> Rect {
@@ -779,13 +818,14 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
             "Keyboard",
             Style::default().add_modifier(Modifier::BOLD),
         )]),
-        Line::from("q: quit, r: refresh, ?: toggle help"),
-        Line::from("/: start search, f: cycle kind filter, Esc: clear search/filter"),
-        Line::from("up/down or j/k: move one row"),
-        Line::from("page up/page down: move one page"),
-        Line::from("g/home: top, G/end: bottom"),
-        Line::from("enter: open selected URL"),
-        Line::from("mouse: click to select, wheel to scroll"),
+        Line::from("q: quit immediately"),
+        Line::from("Esc twice within 1.5s: quit"),
+        Line::from("Tab / Shift+Tab: switch Timeline and Repositories"),
+        Line::from("r: refresh, ?: toggle help, enter: open selected URL"),
+        Line::from("up/down or j/k: move one row (Timeline tab)"),
+        Line::from("page up/page down: move one page (Timeline tab)"),
+        Line::from("g/home: top, G/end: bottom (Timeline tab)"),
+        Line::from("mouse: click to select, wheel to scroll (Timeline tab)"),
     ])
     .block(Block::default().borders(Borders::ALL).title("Help"))
     .wrap(Wrap { trim: true });
@@ -819,7 +859,10 @@ mod tests {
 
     use chrono::TimeZone;
 
-    use super::{build_loading_status_line, truncate_tail, unread_marker, TuiModel};
+    use super::{
+        build_loading_status_line, timeline_column_mode, truncate_tail, unread_marker,
+        TimelineColumnMode, TuiModel,
+    };
     use crate::domain::events::{EventKind, WatchEvent};
 
     fn event(id: &str, created_at: chrono::DateTime<chrono::Utc>) -> WatchEvent {
@@ -883,6 +926,14 @@ mod tests {
     fn unread_marker_shows_asterisk_only_for_unread_event() {
         assert_eq!(unread_marker(false), "*");
         assert_eq!(unread_marker(true), " ");
+    }
+
+    #[test]
+    fn timeline_column_mode_uses_expected_boundaries() {
+        assert_eq!(timeline_column_mode(99), TimelineColumnMode::TitleOnly);
+        assert_eq!(timeline_column_mode(100), TimelineColumnMode::Compact);
+        assert_eq!(timeline_column_mode(114), TimelineColumnMode::Compact);
+        assert_eq!(timeline_column_mode(115), TimelineColumnMode::Full);
     }
 
     #[test]

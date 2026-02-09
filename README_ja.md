@@ -18,7 +18,7 @@ English README: [README.md](README.md)
 - 次のリリースでデモ素材を追加予定:
 - 30-45秒の操作GIF
 - タイムライン画面キャプチャ
-- フィルタ/検索画面キャプチャ
+- タブ切り替え画面キャプチャ
 
 ## 前提条件
 
@@ -120,17 +120,16 @@ gh-watch watch
 ## TUI キーバインド
 
 - `q`: 終了
+- `Esc` を1.5秒以内に2回: 終了
 - `r`: 手動更新
-- `/`: 検索開始
-- `f`: kind フィルタ切替
-- `Esc`: 検索/フィルタ解除
+- `Tab` / `Shift+Tab`: `Timeline` / `Repositories` タブ切替
 - `?`: ヘルプ表示切替
 - `Enter`: 選択URLを開く
-- `↑` / `↓` or `j` / `k`: 1件移動
-- `PageUp` / `PageDown`: 1ページ移動
-- `g` / `Home`: 先頭
-- `G` / `End`: 末尾
-- マウスクリック/ホイール: 選択/スクロール
+- `↑` / `↓` or `j` / `k`: 1件移動（Timelineタブ）
+- `PageUp` / `PageDown`: 1ページ移動（Timelineタブ）
+- `g` / `Home`: 先頭（Timelineタブ）
+- `G` / `End`: 末尾（Timelineタブ）
+- マウスクリック/ホイール: 選択/スクロール（Timelineタブ）
 - タイムライン未読マーカー: `*` は未読、空白は既読
 - 既読化タイミング: 選択移動時または `Enter` でURLを開いたとき（再起動後も保持）
 

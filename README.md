@@ -18,7 +18,7 @@ Reliable GitHub watcher with desktop notifications and a terminal timeline UI.
 - Demo assets are prepared for the next release cut:
 - 30-45 sec GIF walkthrough
 - Timeline screenshot
-- Filter/search screenshot
+- Tab switch screenshot
 
 ## Prerequisites
 
@@ -122,17 +122,16 @@ Global filter keys:
 ## TUI Key Bindings
 
 - `q`: quit
+- `Esc` twice within 1.5 seconds: quit
 - `r`: refresh now
-- `/`: start search
-- `f`: cycle kind filter
-- `Esc`: clear search/filter
+- `Tab` / `Shift+Tab`: switch `Timeline` and `Repositories` tabs
 - `?`: toggle help
 - `Enter`: open selected URL
-- `↑` / `↓` or `j` / `k`: move one item
-- `PageUp` / `PageDown`: move one page
-- `g` / `Home`: top
-- `G` / `End`: bottom
-- Mouse click/wheel in timeline: select/scroll
+- `↑` / `↓` or `j` / `k`: move one item (Timeline tab)
+- `PageUp` / `PageDown`: move one page (Timeline tab)
+- `g` / `Home`: top (Timeline tab)
+- `G` / `End`: bottom (Timeline tab)
+- Mouse click/wheel in timeline: select/scroll (Timeline tab)
 - Timeline unread marker: `*` means unread, blank means read
 - Read timing: selected by navigation or opened with `Enter` (persisted across restarts)
 

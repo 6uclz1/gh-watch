@@ -1,7 +1,9 @@
 use chrono::{TimeZone, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use gh_watch::domain::events::{EventKind, WatchEvent};
-use gh_watch::ui::tui::{handle_input, parse_input, parse_mouse_input, InputCommand, TuiModel};
+use gh_watch::ui::tui::{
+    handle_input, parse_input, parse_mouse_input, ActiveTab, InputCommand, TuiModel,
+};
 use ratatui::layout::Rect;
 
 fn ev(id: &str, ts: chrono::DateTime<Utc>) -> WatchEvent {
@@ -132,16 +134,28 @@ fn extended_navigation_keys_map_to_commands() {
         InputCommand::JumpBottom
     );
     assert_eq!(
-        parse_input(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
-        InputCommand::StartSearch
+        parse_input(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        InputCommand::NextTab
     );
     assert_eq!(
-        parse_input(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
-        InputCommand::CycleKindFilter
+        parse_input(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+        InputCommand::PrevTab
     );
     assert_eq!(
         parse_input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-        InputCommand::ClearSearchAndFilter
+        InputCommand::EscapePressed
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+        InputCommand::None
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
+        InputCommand::None
+    );
+    assert_eq!(
+        parse_input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+        InputCommand::None
     );
 }
 
@@ -155,6 +169,21 @@ fn help_toggle_switches_visibility() {
 
     handle_input(&mut model, InputCommand::ToggleHelp);
     assert!(!model.help_visible);
+}
+
+#[test]
+fn tab_switch_cycles_between_timeline_and_repositories() {
+    let mut model = TuiModel::new(10);
+    assert_eq!(model.active_tab, ActiveTab::Timeline);
+
+    handle_input(&mut model, InputCommand::NextTab);
+    assert_eq!(model.active_tab, ActiveTab::Repositories);
+
+    handle_input(&mut model, InputCommand::NextTab);
+    assert_eq!(model.active_tab, ActiveTab::Timeline);
+
+    handle_input(&mut model, InputCommand::PrevTab);
+    assert_eq!(model.active_tab, ActiveTab::Repositories);
 }
 
 #[test]
@@ -236,114 +265,17 @@ fn timeline_selection_falls_back_when_selected_event_drops_out() {
 }
 
 #[test]
-fn search_input_filters_repo_actor_and_title_incrementally() {
+fn non_timeline_tab_ignores_timeline_navigation_input() {
     let mut model = TuiModel::new(10);
     model.push_timeline(vec![
-        ev_with(
-            "1",
-            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
-            EventKind::PrCreated,
-            "acme/api",
-            "alice",
-            "Fix parser",
-        ),
-        ev_with(
-            "2",
-            Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
-            EventKind::IssueCreated,
-            "acme/web",
-            "bob",
-            "Update docs",
-        ),
+        ev("a", Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap()),
+        ev("b", Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap()),
     ]);
+    model.selected = 0;
+    model.active_tab = ActiveTab::Repositories;
 
-    handle_input(&mut model, InputCommand::StartSearch);
-    handle_input(&mut model, InputCommand::SearchInput('w'));
-    assert_eq!(model.timeline.len(), 1);
-    assert_eq!(model.timeline[0].event_id, "2");
-
-    handle_input(&mut model, InputCommand::SearchInput('e'));
-    assert_eq!(model.timeline.len(), 1);
-    assert_eq!(model.timeline[0].event_id, "2");
-}
-
-#[test]
-fn kind_filter_cycles_and_escape_clears_all_filters() {
-    let mut model = TuiModel::new(10);
-    model.push_timeline(vec![
-        ev_with(
-            "pr",
-            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
-            EventKind::PrCreated,
-            "acme/api",
-            "alice",
-            "PR created",
-        ),
-        ev_with(
-            "issue",
-            Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
-            EventKind::IssueCreated,
-            "acme/api",
-            "alice",
-            "Issue created",
-        ),
-    ]);
-
-    handle_input(&mut model, InputCommand::CycleKindFilter);
-    assert_eq!(model.timeline.len(), 1);
-    assert_eq!(model.timeline[0].event_id, "pr");
-
-    handle_input(&mut model, InputCommand::CycleKindFilter);
-    assert_eq!(model.timeline.len(), 1);
-    assert_eq!(model.timeline[0].event_id, "issue");
-
-    handle_input(&mut model, InputCommand::ClearSearchAndFilter);
-    assert_eq!(model.timeline.len(), 2);
-}
-
-#[test]
-fn selection_remains_valid_when_filters_change() {
-    let mut model = TuiModel::new(10);
-    model.push_timeline(vec![
-        ev_with(
-            "a",
-            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
-            EventKind::PrCreated,
-            "acme/api",
-            "alice",
-            "alpha",
-        ),
-        ev_with(
-            "b",
-            Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
-            EventKind::PrCreated,
-            "acme/api",
-            "alice",
-            "bravo",
-        ),
-        ev_with(
-            "c",
-            Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
-            EventKind::PrCreated,
-            "acme/api",
-            "alice",
-            "charlie",
-        ),
-    ]);
-    model.selected = 1;
-    model.selected_event_key = Some(model.timeline[1].event_key());
-
-    handle_input(&mut model, InputCommand::StartSearch);
-    handle_input(&mut model, InputCommand::SearchInput('c'));
-    assert!(model.selected < model.timeline.len());
-
-    handle_input(&mut model, InputCommand::ClearSearchAndFilter);
-    assert!(model.selected < model.timeline.len());
-    let expected_key = model.timeline[model.selected].event_key();
-    assert_eq!(
-        model.selected_event_key.as_deref(),
-        Some(expected_key.as_str())
-    );
+    handle_input(&mut model, InputCommand::ScrollDown);
+    assert_eq!(model.selected, 0);
 }
 
 #[test]
@@ -367,7 +299,7 @@ fn mouse_click_in_timeline_selects_row_using_offset() {
     let click = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 2,
-        row: 10,
+        row: 13,
         modifiers: KeyModifiers::NONE,
     };
 
@@ -421,13 +353,13 @@ fn mouse_wheel_maps_to_scroll_commands() {
     let wheel_up = MouseEvent {
         kind: MouseEventKind::ScrollUp,
         column: 2,
-        row: 10,
+        row: 13,
         modifiers: KeyModifiers::NONE,
     };
     let wheel_down = MouseEvent {
         kind: MouseEventKind::ScrollDown,
         column: 2,
-        row: 10,
+        row: 13,
         modifiers: KeyModifiers::NONE,
     };
 
@@ -439,4 +371,31 @@ fn mouse_wheel_maps_to_scroll_commands() {
         parse_mouse_input(wheel_down, area, &model),
         InputCommand::ScrollDown
     );
+}
+
+#[test]
+fn mouse_input_is_disabled_on_repositories_tab() {
+    let mut model = TuiModel::new(10);
+    model.push_timeline(vec![ev(
+        "1",
+        Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+    )]);
+    model.active_tab = ActiveTab::Repositories;
+
+    let area = Rect::new(0, 0, 100, 30);
+    let wheel = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 2,
+        row: 13,
+        modifiers: KeyModifiers::NONE,
+    };
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 13,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    assert_eq!(parse_mouse_input(wheel, area, &model), InputCommand::None);
+    assert_eq!(parse_mouse_input(click, area, &model), InputCommand::None);
 }

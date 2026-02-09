@@ -166,7 +166,9 @@ gh-watch watch
 ## 通知バックエンド
 
 - macOS: `osascript`（`display notification`）で通知
-- 非 macOS: 通知は Noop（起動時に warning を表示）
+- WSL: `powershell.exe` + WinForms `NotifyIcon.ShowBalloonTip(10000)` で通知
+- WSLのバルーン通知クリックで対象イベントのURLを開く
+- それ以外の環境: 通知は Noop（起動時に warning を表示）
 - 最終的なバナー表示有無は OS 側の通知設定やフォーカスモードに依存
 
 ## 開発時の品質ゲート

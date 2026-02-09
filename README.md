@@ -170,7 +170,9 @@ Notification config keys:
 ## Notification Backend
 
 - macOS: notifications are sent via `osascript` (`display notification`).
-- Non-macOS: notifier runs in noop mode and prints a startup warning.
+- WSL: notifications are sent via `powershell.exe` + WinForms `NotifyIcon.ShowBalloonTip(10000)`.
+- WSL balloon click opens the event URL.
+- Other environments: notifier runs in noop mode and prints a startup warning.
 - Banner visibility still depends on OS notification settings / focus mode.
 
 ## Developer Quality Gates

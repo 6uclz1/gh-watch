@@ -16,7 +16,8 @@ use crate::{
     app::{notification_test::run_notification_test, poll_once::poll_once, watch_loop::run_watch},
     config::{
         default_state_db_path, installed_config_path, load_config_with_path, parse_config,
-        resolution_candidates, resolve_config_path_with_source, Config, ResolvedConfigPath,
+        resolution_candidates, resolve_config_path_with_source, Config, NotificationConfig,
+        ResolvedConfigPath,
     },
     infra::{
         gh_client::GhCliClient,
@@ -416,6 +417,9 @@ async fn run_once_cmd(
     let state = open_state_store(&state_path)?;
 
     let notifier = DesktopNotifier::from_notification_config(&cfg.notifications);
+    for warning in notifier.startup_warnings() {
+        eprintln!("notification backend warning: {warning}");
+    }
     if let Err(err) = notifier.check_health() {
         eprintln!("notification backend warning: {err}");
     }
@@ -513,6 +517,9 @@ async fn run_doctor_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Res
     println!("gh auth: ok");
 
     let notifier = DesktopNotifier::from_notification_config(&cfg.notifications);
+    for warning in notifier.startup_warnings() {
+        eprintln!("notification backend warning: {warning}");
+    }
     match notifier.check_health() {
         Ok(()) => println!("notifier: ok"),
         Err(err) => println!("notifier: warning ({err})"),
@@ -528,7 +535,7 @@ async fn run_doctor_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Res
 fn run_notification_test_cmd() -> Result<()> {
     println!("notification-test: start");
 
-    let notifier = DesktopNotifier;
+    let notifier = DesktopNotifier::from_notification_config(&NotificationConfig::default());
     for warning in notifier.startup_warnings() {
         println!("notification-test: warning: {warning}");
     }

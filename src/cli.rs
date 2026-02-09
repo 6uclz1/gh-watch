@@ -943,6 +943,7 @@ fn render_config(
     out.push_str(&format!("include_url = {include_url}\n"));
     out.push_str("# macos_bundle_id = \"com.apple.Terminal\"\n");
     out.push_str("# windows_app_id = \"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\"\n");
+    out.push_str("# wsl_windows_app_id = \"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\"\n");
     out.push('\n');
     out.push_str("[poll]\n");
     out.push_str("max_concurrency = 4\n");

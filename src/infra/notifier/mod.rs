@@ -31,6 +31,8 @@ pub(super) struct PlatformNotificationOptions {
     pub(super) macos_bundle_id: Option<String>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(super) windows_app_id: Option<String>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(super) wsl_windows_app_id: Option<String>,
 }
 
 impl PlatformNotificationOptions {
@@ -38,6 +40,7 @@ impl PlatformNotificationOptions {
         Self {
             macos_bundle_id: config.macos_bundle_id.clone(),
             windows_app_id: config.windows_app_id.clone(),
+            wsl_windows_app_id: config.wsl_windows_app_id.clone(),
         }
     }
 

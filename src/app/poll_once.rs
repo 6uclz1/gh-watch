@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, Utc};
 use futures_util::stream::{self, StreamExt};
 use serde::Serialize;
@@ -6,10 +6,7 @@ use std::{collections::HashSet, time::Duration as StdDuration};
 
 use crate::{
     config::Config,
-    domain::{
-        events::{event_matches_notification_filters, EventKind, WatchEvent},
-        failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL},
-    },
+    domain::events::{event_matches_notification_filters, EventKind, WatchEvent},
     ports::{ClockPort, GhClientPort, NotifierPort, RepoPersistBatch, StateStorePort},
 };
 
@@ -19,8 +16,6 @@ const POLL_OVERLAP_SECONDS: i64 = 300;
 pub struct PollOutcome {
     pub notified_count: usize,
     pub bootstrap_repos: usize,
-    pub repo_errors: Vec<String>,
-    pub failures: Vec<FailureRecord>,
     pub notified_events: Vec<WatchEvent>,
     pub timeline_events: Vec<WatchEvent>,
 }
@@ -45,11 +40,10 @@ enum RepoFetchResult {
     },
 }
 
-struct RepoEventProcessingContext<'a, S, N, K> {
+struct RepoEventProcessingContext<'a, S, N> {
     config: &'a Config,
     state: &'a S,
     notifier: &'a N,
-    clock: &'a K,
     viewer_login: Option<String>,
 }
 
@@ -67,7 +61,7 @@ where
     K: ClockPort,
 {
     let now = clock.now();
-    state.cleanup_old(config.retention_days, config.failure_history_limit, now)?;
+    state.cleanup_old(config.retention_days, now)?;
     let viewer_login = if config.filters.only_involving_me {
         Some(
             gh.viewer_login()
@@ -78,76 +72,61 @@ where
         None
     };
 
-    let mut outcome = PollOutcome::default();
-    let plans = plan_window(config, state, clock, &mut outcome)?;
+    let plans = plan_window(config, state, clock)?;
     let fetch_results = collect_events(config, gh, plans).await;
+    let mut outcome = PollOutcome {
+        bootstrap_repos: fetch_results
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    RepoFetchResult::Fetched {
+                        plan: RepoPollPlan {
+                            is_bootstrap: true,
+                            ..
+                        },
+                        ..
+                    }
+                )
+            })
+            .count(),
+        ..PollOutcome::default()
+    };
 
     let processing_context = RepoEventProcessingContext {
         config,
         state,
         notifier,
-        clock,
         viewer_login,
     };
 
     for fetch_result in fetch_results {
         match fetch_result {
             RepoFetchResult::Fetched { plan, events } => {
-                let repo_name = plan.repo_name.clone();
-                if let Err(err) = persist_batch(&processing_context, &mut outcome, plan, events) {
-                    record_repo_poll_failure(
-                        state,
-                        clock,
-                        &mut outcome,
-                        repo_name.as_str(),
-                        format!("failed to persist repo batch: {err:#}").as_str(),
-                    );
-                }
+                persist_batch(&processing_context, &mut outcome, plan, events)?;
             }
             RepoFetchResult::Failed {
                 repo_name,
                 error_message,
-            } => record_repo_poll_failure(
-                state,
-                clock,
-                &mut outcome,
-                repo_name.as_str(),
-                error_message.as_str(),
-            ),
+            } => {
+                return Err(anyhow!("{repo_name}: {error_message}"));
+            }
         }
     }
 
     Ok(outcome)
 }
 
-fn plan_window<S, K>(
-    config: &Config,
-    state: &S,
-    clock: &K,
-    outcome: &mut PollOutcome,
-) -> Result<Vec<RepoPollPlan>>
+fn plan_window<S, K>(config: &Config, state: &S, clock: &K) -> Result<Vec<RepoPollPlan>>
 where
     S: StateStorePort,
     K: ClockPort,
 {
     let mut plans = Vec::new();
     for repo in config.repositories.iter().filter(|r| r.enabled) {
-        let cursor = match state
+        let cursor = state
             .get_cursor(&repo.name)
-            .with_context(|| format!("failed to load cursor for {}", repo.name))
-        {
-            Ok(cursor) => cursor,
-            Err(err) => {
-                record_repo_poll_failure(
-                    state,
-                    clock,
-                    outcome,
-                    repo.name.as_str(),
-                    format!("{err:#}").as_str(),
-                );
-                continue;
-            }
-        };
+            .with_context(|| format!("failed to load cursor for {}", repo.name))?;
 
         let poll_started_at = clock.now();
         let allowed_event_kinds = repo
@@ -156,26 +135,6 @@ where
             .unwrap_or_else(|| config.filters.event_kinds.clone());
 
         let Some(cursor) = cursor else {
-            outcome.bootstrap_repos += 1;
-            if config.bootstrap_lookback_hours == 0 {
-                let batch = RepoPersistBatch {
-                    repo: repo.name.clone(),
-                    poll_started_at,
-                    events: Vec::new(),
-                };
-                if let Err(err) = state.persist_repo_batch(&batch) {
-                    record_repo_poll_failure(
-                        state,
-                        clock,
-                        outcome,
-                        repo.name.as_str(),
-                        format!("failed to set bootstrap cursor for {}: {err:#}", repo.name)
-                            .as_str(),
-                    );
-                }
-                continue;
-            }
-
             plans.push(RepoPollPlan {
                 repo_name: repo.name.clone(),
                 since: bootstrap_since(poll_started_at, config.bootstrap_lookback_hours),
@@ -244,8 +203,8 @@ where
     results
 }
 
-fn persist_batch<S, N, K>(
-    context: &RepoEventProcessingContext<'_, S, N, K>,
+fn persist_batch<S, N>(
+    context: &RepoEventProcessingContext<'_, S, N>,
     outcome: &mut PollOutcome,
     plan: RepoPollPlan,
     events: Vec<WatchEvent>,
@@ -253,7 +212,6 @@ fn persist_batch<S, N, K>(
 where
     S: StateStorePort,
     N: NotifierPort,
-    K: ClockPort,
 {
     let mut events = events
         .into_iter()
@@ -297,67 +255,13 @@ where
     }
 
     for event in newly_logged_events {
-        match context
+        context
             .notifier
             .notify(&event, context.config.notifications.include_url)
-        {
-            Ok(_) => {
-                outcome.notified_count += 1;
-                outcome.notified_events.push(event);
-            }
-            Err(err) => {
-                let failure = FailureRecord::new(
-                    FAILURE_KIND_NOTIFICATION,
-                    event.repo.clone(),
-                    context.clock.now(),
-                    format!("{}: {}", event.event_key(), err),
-                );
-                if let Err(record_err) = context.state.record_failure(&failure) {
-                    outcome.repo_errors.push(format!(
-                        "{}: notification failed for {} but failure record persistence failed: {}",
-                        event.repo,
-                        event.event_key(),
-                        record_err
-                    ));
-                } else {
-                    outcome.failures.push(failure);
-                    outcome.repo_errors.push(format!(
-                        "{}: notification failed for {}: {}",
-                        event.repo,
-                        event.event_key(),
-                        err
-                    ));
-                }
-            }
-        }
+            .with_context(|| format!("notification failed for {}", event.event_key()))?;
+        outcome.notified_count += 1;
+        outcome.notified_events.push(event);
     }
 
     Ok(())
-}
-
-fn record_repo_poll_failure<S, K>(
-    state: &S,
-    clock: &K,
-    outcome: &mut PollOutcome,
-    repo_name: &str,
-    error_message: &str,
-) where
-    S: StateStorePort,
-    K: ClockPort,
-{
-    let failure = FailureRecord::new(
-        FAILURE_KIND_REPO_POLL,
-        repo_name.to_string(),
-        clock.now(),
-        error_message.to_string(),
-    );
-
-    let mut rendered = format!("{repo_name}: {error_message}");
-    if let Err(err) = state.record_failure(&failure) {
-        rendered.push_str(&format!(" | failed to persist failure record: {err}"));
-    } else {
-        outcome.failures.push(failure);
-    }
-
-    outcome.repo_errors.push(rendered);
 }

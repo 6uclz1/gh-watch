@@ -2,17 +2,13 @@ use std::{fs, path::Path, path::PathBuf};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use chrono::{Duration, Utc};
-use gh_watch::domain::{
-    events::{EventKind, WatchEvent},
-    failure::FailureRecord,
-};
 use gh_watch::infra::state_sqlite::SqliteStateStore;
 use gh_watch::ports::StateStorePort;
-use predicates::str::contains;
+use predicates::prelude::*;
 use tempfile::tempdir;
 
 #[test]
-fn once_json_returns_partial_failure_exit_code_2() {
+fn once_json_returns_failure_exit_code_1_when_any_repo_fails() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     let state_db_path = dir.path().join("state.db");
@@ -73,20 +69,34 @@ exit 1
         .env("GH_WATCH_GH_BIN", gh_path)
         .assert()
         .failure()
-        .code(2)
-        .stdout(contains("\"repo_errors\":["));
+        .code(1);
 }
 
 #[test]
-fn help_lists_once_report_and_doctor_commands() {
+fn help_lists_minimal_commands_and_hides_removed_commands() {
     let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("--help")
         .assert()
         .success()
-        .stdout(contains("once"))
-        .stdout(contains("report"))
-        .stdout(contains("doctor"))
-        .stdout(contains("notification-test"));
+        .stdout(predicate::str::contains("watch"))
+        .stdout(predicate::str::contains("once"))
+        .stdout(predicate::str::contains("check"))
+        .stdout(predicate::str::contains("init"))
+        .stdout(predicate::str::contains("config"))
+        .stdout(predicate::str::contains("report").not())
+        .stdout(predicate::str::contains("doctor").not())
+        .stdout(predicate::str::contains("notification-test").not());
+}
+
+#[test]
+fn removed_top_level_commands_are_unavailable() {
+    for command in ["report", "doctor", "notification-test"] {
+        let mut cmd = cargo_bin_cmd!("gh-watch");
+        cmd.arg(command)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("unrecognized subcommand"));
+    }
 }
 
 #[test]
@@ -159,146 +169,6 @@ exit 1
 }
 
 #[test]
-fn report_markdown_default_includes_counts() {
-    let dir = tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    let state_db_path = dir.path().join("state.db");
-    write_config(&config_path, &state_db_path, &["acme/api"]);
-    seed_report_data(&state_db_path);
-
-    let mut cmd = cargo_bin_cmd!("gh-watch");
-    cmd.arg("report")
-        .arg("--config")
-        .arg(&config_path)
-        .assert()
-        .success()
-        .stdout(contains("# gh-watch report"))
-        .stdout(contains("events_total: 1"))
-        .stdout(contains("failures_total: 1"));
-}
-
-#[test]
-fn report_json_is_machine_readable() {
-    let dir = tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    let state_db_path = dir.path().join("state.db");
-    write_config(&config_path, &state_db_path, &["acme/api"]);
-    seed_report_data(&state_db_path);
-
-    let output = cargo_bin_cmd!("gh-watch")
-        .arg("report")
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--since")
-        .arg("72h")
-        .arg("--format")
-        .arg("json")
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let raw = String::from_utf8(output.stdout).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
-    assert_eq!(parsed["events_total"].as_u64().unwrap(), 1);
-    assert_eq!(parsed["failures_total"].as_u64().unwrap(), 1);
-}
-
-#[test]
-fn doctor_fails_when_gh_auth_is_invalid() {
-    let dir = tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    let state_db_path = dir.path().join("state.db");
-    write_config(&config_path, &state_db_path, &["acme/api"]);
-
-    let gh_path = write_stub_gh(
-        dir.path(),
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-if [[ "$1" == "auth" && "$2" == "status" ]]; then
-  echo "auth required" >&2
-  exit 1
-fi
-echo "unexpected args: $@" >&2
-exit 1
-"#,
-    );
-
-    let mut cmd = cargo_bin_cmd!("gh-watch");
-    cmd.arg("doctor")
-        .arg("--config")
-        .arg(&config_path)
-        .env("GH_WATCH_GH_BIN", gh_path)
-        .assert()
-        .failure()
-        .stderr(contains("GitHub authentication is invalid"));
-}
-
-#[test]
-fn doctor_succeeds_and_reports_checks() {
-    let dir = tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    let state_db_path = dir.path().join("state.db");
-    write_config(&config_path, &state_db_path, &["acme/api"]);
-
-    let gh_path = write_stub_gh(
-        dir.path(),
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-if [[ "$1" == "auth" && "$2" == "status" ]]; then
-  exit 0
-fi
-if [[ "$1" == "api" && "$2" == "user" ]]; then
-  echo "alice"
-  exit 0
-fi
-echo "unexpected args: $@" >&2
-exit 1
-"#,
-    );
-
-    let mut cmd = cargo_bin_cmd!("gh-watch");
-    cmd.arg("doctor")
-        .arg("--config")
-        .arg(&config_path)
-        .env("GH_WATCH_GH_BIN", gh_path)
-        .assert()
-        .success()
-        .stdout(contains("config doctor: ok"))
-        .stdout(contains("gh auth: ok"))
-        .stdout(contains("state db:"));
-}
-
-#[test]
-fn doctor_fails_with_reset_hint_when_state_schema_is_legacy() {
-    let dir = tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    let state_db_path = dir.path().join("state.db");
-    write_config(&config_path, &state_db_path, &["acme/api"]);
-    seed_legacy_state_db(&state_db_path);
-
-    let gh_path = write_stub_gh(
-        dir.path(),
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-if [[ "$1" == "auth" && "$2" == "status" ]]; then
-  exit 0
-fi
-echo "unexpected args: $@" >&2
-exit 1
-"#,
-    );
-
-    let mut cmd = cargo_bin_cmd!("gh-watch");
-    cmd.arg("doctor")
-        .arg("--config")
-        .arg(&config_path)
-        .env("GH_WATCH_GH_BIN", gh_path)
-        .assert()
-        .failure()
-        .stderr(contains("init --reset-state"));
-}
-
-#[test]
 fn check_fails_with_reset_hint_when_state_schema_is_legacy() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
@@ -325,7 +195,7 @@ exit 1
         .env("GH_WATCH_GH_BIN", gh_path)
         .assert()
         .failure()
-        .stderr(contains("init --reset-state"));
+        .stderr(predicate::str::contains("init --reset-state"));
 }
 
 #[test]
@@ -355,7 +225,7 @@ exit 1
         .env("GH_WATCH_GH_BIN", gh_path)
         .assert()
         .failure()
-        .stderr(contains("init --reset-state"));
+        .stderr(predicate::str::contains("init --reset-state"));
 }
 
 fn write_stub_gh(dir: &Path, script: &str) -> PathBuf {
@@ -381,7 +251,6 @@ interval_seconds = 300
 bootstrap_lookback_hours = 24
 timeline_limit = 500
 retention_days = 90
-failure_history_limit = 200
 state_db_path = "{escaped}"
 
 [notifications]
@@ -401,34 +270,6 @@ timeout_seconds = 30
     }
 
     fs::write(config_path, src).unwrap();
-}
-
-fn seed_report_data(state_db_path: &Path) {
-    let store = SqliteStateStore::new(state_db_path).unwrap();
-    let now = Utc::now();
-    store
-        .append_timeline_event(&WatchEvent {
-            event_id: "ev-1".to_string(),
-            repo: "acme/api".to_string(),
-            kind: EventKind::IssueCommentCreated,
-            actor: "alice".to_string(),
-            title: "Report event".to_string(),
-            url: "https://example.com/ev-1".to_string(),
-            created_at: now - Duration::minutes(30),
-            source_item_id: "ev-1".to_string(),
-            subject_author: Some("bob".to_string()),
-            requested_reviewer: None,
-            mentions: vec!["alice".to_string()],
-        })
-        .unwrap();
-    store
-        .record_failure(&FailureRecord::new(
-            "repo_poll",
-            "acme/api",
-            now - Duration::minutes(10),
-            "temporary failure",
-        ))
-        .unwrap();
 }
 
 fn seed_legacy_state_db(state_db_path: &Path) {

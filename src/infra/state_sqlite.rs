@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 
 use crate::{
-    domain::{events::WatchEvent, failure::FailureRecord},
+    domain::events::WatchEvent,
     ports::{PersistBatchResult, RepoPersistBatch, StateStorePort},
 };
 
@@ -118,7 +118,7 @@ SELECT EXISTS(
             return Ok(false);
         }
 
-        for table in ["polling_cursors_v2", "event_log_v2", "failure_events"] {
+        for table in ["polling_cursors_v2", "event_log_v2"] {
             if !Self::table_exists(conn, table)? {
                 return Ok(false);
             }
@@ -152,17 +152,6 @@ CREATE TABLE IF NOT EXISTS event_log_v2 (
 
 CREATE INDEX IF NOT EXISTS idx_event_log_v2_created_at
 ON event_log_v2 (created_at DESC);
-
-CREATE TABLE IF NOT EXISTS failure_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL,
-  repo TEXT NOT NULL,
-  failed_at TEXT NOT NULL,
-  message TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_failure_events_failed_at
-ON failure_events (failed_at DESC, id DESC);
 ",
         )?;
 
@@ -180,63 +169,6 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value
 
     fn parse_watch_event_payload(payload: String) -> Result<WatchEvent> {
         Ok(serde_json::from_str(&payload)?)
-    }
-
-    pub fn load_timeline_events_since(
-        &self,
-        since: DateTime<Utc>,
-        limit: usize,
-    ) -> Result<Vec<WatchEvent>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let mut stmt = conn.prepare(
-            "
-SELECT payload_json
-FROM event_log_v2
-WHERE created_at >= ?1
-ORDER BY created_at DESC
-LIMIT ?2
-",
-        )?;
-
-        let rows = stmt.query_map(params![since.to_rfc3339(), limit as i64], |row| {
-            row.get::<_, String>(0)
-        })?;
-
-        rows.map(|row| Self::parse_watch_event_payload(row?))
-            .collect::<Result<Vec<_>>>()
-    }
-
-    pub fn load_failures_since(
-        &self,
-        since: DateTime<Utc>,
-        limit: usize,
-    ) -> Result<Vec<FailureRecord>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let mut stmt = conn.prepare(
-            "
-SELECT kind, repo, failed_at, message
-FROM failure_events
-WHERE failed_at >= ?1
-ORDER BY failed_at DESC, id DESC
-LIMIT ?2
-",
-        )?;
-
-        let rows = stmt.query_map(params![since.to_rfc3339(), limit as i64], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-
-        rows.map(|row| -> Result<FailureRecord> {
-            let (kind, repo, failed_at, message) = row?;
-            let failed_at = DateTime::parse_from_rfc3339(&failed_at)?.with_timezone(&Utc);
-            Ok(FailureRecord::new(kind, repo, failed_at, message))
-        })
-        .collect::<Result<Vec<_>>>()
     }
 }
 
@@ -266,108 +198,6 @@ VALUES (?1, ?2)
 ON CONFLICT(repo) DO UPDATE SET last_polled_at = excluded.last_polled_at
 ",
             params![repo, at.to_rfc3339()],
-        )?;
-        Ok(())
-    }
-
-    fn is_event_notified(&self, event_key: &str) -> Result<bool> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let delivered_at: Option<String> = conn
-            .query_row(
-                "SELECT delivered_at FROM event_log_v2 WHERE event_key = ?1",
-                params![event_key],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
-        Ok(delivered_at.is_some())
-    }
-
-    fn record_notified_event(&self, event: &WatchEvent, notified_at: DateTime<Utc>) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let payload = serde_json::to_string(event)?;
-        conn.execute(
-            "
-INSERT INTO event_log_v2
-  (event_key, repo, payload_json, created_at, observed_at, delivered_at, read_at)
-VALUES
-  (?1, ?2, ?3, ?4, ?5, ?6, NULL)
-ON CONFLICT(event_key) DO UPDATE SET
-  payload_json = excluded.payload_json,
-  created_at = excluded.created_at,
-  observed_at = excluded.observed_at,
-  delivered_at = excluded.delivered_at
-",
-            params![
-                event.event_key(),
-                event.repo,
-                payload,
-                event.created_at.to_rfc3339(),
-                notified_at.to_rfc3339(),
-                notified_at.to_rfc3339(),
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn record_failure(&self, failure: &FailureRecord) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        conn.execute(
-            "
-INSERT INTO failure_events (kind, repo, failed_at, message)
-VALUES (?1, ?2, ?3, ?4)
-",
-            params![
-                &failure.kind,
-                &failure.repo,
-                failure.failed_at.to_rfc3339(),
-                &failure.message,
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn latest_failure(&self) -> Result<Option<FailureRecord>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let row: Option<(String, String, String, String)> = conn
-            .query_row(
-                "
-SELECT kind, repo, failed_at, message
-FROM failure_events
-ORDER BY failed_at DESC, id DESC
-LIMIT 1
-",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-
-        row.map(
-            |(kind, repo, failed_at, message)| -> Result<FailureRecord> {
-                let parsed = DateTime::parse_from_rfc3339(&failed_at)?.with_timezone(&Utc);
-                Ok(FailureRecord::new(kind, repo, parsed, message))
-            },
-        )
-        .transpose()
-    }
-
-    fn append_timeline_event(&self, event: &WatchEvent) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let payload = serde_json::to_string(event)?;
-        conn.execute(
-            "
-INSERT OR IGNORE INTO event_log_v2
-  (event_key, repo, payload_json, created_at, observed_at, delivered_at, read_at)
-VALUES
-  (?1, ?2, ?3, ?4, ?5, NULL, NULL)
-",
-            params![
-                event.event_key(),
-                event.repo,
-                payload,
-                event.created_at.to_rfc3339(),
-                Utc::now().to_rfc3339(),
-            ],
         )?;
         Ok(())
     }
@@ -428,33 +258,12 @@ WHERE read_at IS NOT NULL
         Ok(read_keys)
     }
 
-    fn cleanup_old(
-        &self,
-        retention_days: u32,
-        failure_history_limit: usize,
-        now: DateTime<Utc>,
-    ) -> Result<()> {
+    fn cleanup_old(&self, retention_days: u32, now: DateTime<Utc>) -> Result<()> {
         let cutoff = now - Duration::days(retention_days as i64);
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         conn.execute(
             "DELETE FROM event_log_v2 WHERE created_at < ?1",
             params![cutoff.to_rfc3339()],
-        )?;
-        conn.execute(
-            "DELETE FROM failure_events WHERE failed_at < ?1",
-            params![cutoff.to_rfc3339()],
-        )?;
-        conn.execute(
-            "
-DELETE FROM failure_events
-WHERE id IN (
-  SELECT id
-  FROM failure_events
-  ORDER BY failed_at DESC, id DESC
-  LIMIT -1 OFFSET ?1
-)
-",
-            params![failure_history_limit as i64],
         )?;
         Ok(())
     }

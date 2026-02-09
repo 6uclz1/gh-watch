@@ -9,7 +9,6 @@ use tokio::time::MissedTickBehavior;
 use crate::{
     app::poll_once::{poll_once, PollOutcome},
     config::Config,
-    domain::failure::{FailureRecord, FAILURE_KIND_INPUT_STREAM, FAILURE_KIND_POLL_LOOP},
     ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
     ui::tui::{handle_input, parse_input, parse_mouse_input, InputCommand, TerminalUi, TuiModel},
 };
@@ -174,21 +173,6 @@ where
 
             model.failure_count += 1;
             model.status_line = format!("input stream failed: {err}");
-            let failure = FailureRecord::new(
-                FAILURE_KIND_INPUT_STREAM,
-                "<watch_loop>",
-                clock.now(),
-                err.to_string(),
-            );
-
-            if let Err(record_err) = state.record_failure(&failure) {
-                tracing::warn!(error = %record_err, "failed to persist input stream failure");
-                model.status_line =
-                    format!("input stream failed: {err} | failed to persist error: {record_err}");
-            } else {
-                model.latest_failure = Some(failure);
-            }
-
             LoopControl::Redraw
         }
         None => LoopControl::Quit,
@@ -230,9 +214,8 @@ fn enabled_repository_names(config: &Config) -> Vec<String> {
         .collect()
 }
 
-fn apply_poll_result<S, K>(result: Result<PollOutcome>, model: &mut TuiModel, state: &S, clock: &K)
+fn apply_poll_result<K>(result: Result<PollOutcome>, model: &mut TuiModel, clock: &K)
 where
-    S: StateStorePort,
     K: ClockPort,
 {
     match result {
@@ -241,36 +224,12 @@ where
             if new_count > 0 {
                 model.push_timeline(outcome.timeline_events);
             }
-            if outcome.repo_errors.is_empty() {
-                model.status_line = format!("ok (new={new_count})");
-                model.last_success_at = Some(clock.now());
-            } else {
-                model.status_line = format!(
-                    "partial errors={} (new={})",
-                    outcome.repo_errors.len(),
-                    new_count
-                );
-                model.failure_count += outcome.repo_errors.len() as u64;
-            }
-            if let Some(last_failure) = outcome.failures.last().cloned() {
-                model.latest_failure = Some(last_failure);
-            }
+            model.status_line = format!("ok (new={new_count})");
+            model.last_success_at = Some(clock.now());
         }
         Err(err) => {
             model.failure_count += 1;
             model.status_line = format!("poll failed: {err}");
-            let failure = FailureRecord::new(
-                FAILURE_KIND_POLL_LOOP,
-                "<watch_loop>",
-                clock.now(),
-                err.to_string(),
-            );
-            if let Err(record_err) = state.record_failure(&failure) {
-                model.status_line =
-                    format!("poll failed: {err} | failed to persist error: {record_err}");
-            } else {
-                model.latest_failure = Some(failure);
-            }
         }
     }
 }
@@ -299,7 +258,6 @@ where
     let read_event_keys = state.load_read_event_keys(&timeline_keys)?;
     model.replace_timeline(timeline);
     model.replace_read_event_keys(read_event_keys);
-    model.latest_failure = state.latest_failure()?;
     model.status_line = "ready".to_string();
     model.next_poll_at = Some(clock.now());
     ui.draw(&mut model)?;
@@ -345,7 +303,7 @@ where
                 let result = poll_result.expect("poll future must exist when branch is active");
                 in_flight_poll = None;
 
-                apply_poll_result(result, &mut model, state, clock);
+                apply_poll_result(result, &mut model, clock);
                 let queued_for_immediate_next = poll_state.finish_poll_and_take_next_request();
 
                 model.is_polling = poll_state.in_flight();
@@ -456,27 +414,18 @@ mod tests {
     };
     use crate::{
         config::{Config, FiltersConfig, NotificationConfig, PollConfig, RepositoryConfig},
-        domain::{
-            events::{EventKind, WatchEvent},
-            failure::FailureRecord,
-        },
+        domain::events::{EventKind, WatchEvent},
         ports::{ClockPort, StateStorePort},
         ui::tui::TuiModel,
     };
 
     #[derive(Clone, Default)]
     struct FakeState {
-        failures: Arc<Mutex<Vec<FailureRecord>>>,
-        fail_record_failure: Arc<Mutex<bool>>,
         marked_read_event_keys: Arc<Mutex<Vec<String>>>,
         fail_mark_read: Arc<Mutex<bool>>,
     }
 
     impl FakeState {
-        fn set_record_failure_error(&self, should_fail: bool) {
-            *self.fail_record_failure.lock().unwrap() = should_fail;
-        }
-
         fn marked_read_event_keys(&self) -> Vec<String> {
             self.marked_read_event_keys.lock().unwrap().clone()
         }
@@ -492,34 +441,6 @@ mod tests {
         }
 
         fn set_cursor(&self, _repo: &str, _at: chrono::DateTime<Utc>) -> Result<()> {
-            Ok(())
-        }
-
-        fn is_event_notified(&self, _event_key: &str) -> Result<bool> {
-            Ok(false)
-        }
-
-        fn record_notified_event(
-            &self,
-            _event: &WatchEvent,
-            _notified_at: chrono::DateTime<Utc>,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        fn record_failure(&self, failure: &FailureRecord) -> Result<()> {
-            if *self.fail_record_failure.lock().unwrap() {
-                return Err(anyhow!("state store down"));
-            }
-            self.failures.lock().unwrap().push(failure.clone());
-            Ok(())
-        }
-
-        fn latest_failure(&self) -> Result<Option<FailureRecord>> {
-            Ok(self.failures.lock().unwrap().last().cloned())
-        }
-
-        fn append_timeline_event(&self, _event: &WatchEvent) -> Result<()> {
             Ok(())
         }
 
@@ -552,12 +473,7 @@ mod tests {
                 .collect())
         }
 
-        fn cleanup_old(
-            &self,
-            _retention_days: u32,
-            _failure_history_limit: usize,
-            _now: chrono::DateTime<Utc>,
-        ) -> Result<()> {
+        fn cleanup_old(&self, _retention_days: u32, _now: chrono::DateTime<Utc>) -> Result<()> {
             Ok(())
         }
 
@@ -604,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_error_is_recorded_for_traceability() {
+    fn stream_error_sets_status_and_redraws() {
         let state = FakeState::default();
         let clock = FixedClock {
             now: Utc.with_ymd_and_hms(2025, 1, 7, 0, 0, 0).unwrap(),
@@ -627,46 +543,6 @@ mod tests {
         assert_eq!(model.failure_count, 1);
         assert!(model.status_line.contains("input stream failed"));
         assert!(model.status_line.contains("event stream disconnected"));
-
-        let failure = state.latest_failure().unwrap().unwrap();
-        assert_eq!(
-            failure.kind,
-            crate::domain::failure::FAILURE_KIND_INPUT_STREAM
-        );
-        assert_eq!(failure.repo, "<watch_loop>");
-        assert_eq!(failure.failed_at, clock.now);
-        assert!(failure.message.contains("event stream disconnected"));
-    }
-
-    #[test]
-    fn stream_error_persistence_failure_keeps_root_cause_visible() {
-        let state = FakeState::default();
-        state.set_record_failure_error(true);
-        let clock = FixedClock {
-            now: Utc.with_ymd_and_hms(2025, 1, 8, 0, 0, 0).unwrap(),
-        };
-        let mut model = TuiModel::new(10);
-
-        let control = handle_stream_event(
-            Some(Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "event stream disconnected",
-            ))),
-            &mut model,
-            &state,
-            &clock,
-            test_area(),
-            &open_ok,
-        );
-
-        assert_eq!(control, LoopControl::Redraw);
-        assert_eq!(model.failure_count, 1);
-        assert!(model.status_line.contains("event stream disconnected"));
-        assert!(model
-            .status_line
-            .contains("failed to persist error: state store down"));
-        assert!(model.latest_failure.is_none());
-        assert!(state.latest_failure().unwrap().is_none());
     }
 
     #[test]
@@ -676,7 +552,6 @@ mod tests {
             bootstrap_lookback_hours: 24,
             timeline_limit: 500,
             retention_days: 90,
-            failure_history_limit: 200,
             state_db_path: None,
             repositories: vec![
                 RepositoryConfig {
@@ -710,7 +585,6 @@ mod tests {
 
     #[test]
     fn watch_status_new_uses_timeline_reflections() {
-        let state = FakeState::default();
         let clock = FixedClock {
             now: Utc.with_ymd_and_hms(2025, 1, 8, 12, 0, 0).unwrap(),
         };
@@ -723,16 +597,12 @@ mod tests {
             ],
             ..PollOutcome::default()
         };
-        apply_poll_result(Ok(outcome), &mut model, &state, &clock);
+        apply_poll_result(Ok(outcome), &mut model, &clock);
         assert_eq!(model.status_line, "ok (new=2)");
 
-        let outcome = PollOutcome {
-            repo_errors: vec!["notify failed".to_string()],
-            timeline_events: vec![timeline_event("ev-c", clock.now)],
-            ..PollOutcome::default()
-        };
-        apply_poll_result(Ok(outcome), &mut model, &state, &clock);
-        assert_eq!(model.status_line, "partial errors=1 (new=1)");
+        apply_poll_result(Err(anyhow!("boom")), &mut model, &clock);
+        assert_eq!(model.status_line, "poll failed: boom");
+        assert_eq!(model.failure_count, 1);
     }
 
     #[test]
@@ -793,33 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn enter_marks_selected_event_as_read_without_navigation() {
-        let state = FakeState::default();
-        let clock = FixedClock {
-            now: Utc.with_ymd_and_hms(2025, 1, 9, 1, 0, 0).unwrap(),
-        };
-        let mut model = TuiModel::new(10);
-        model.timeline = vec![timeline_event("ev-enter-read", clock.now)];
-        model.selected = 0;
-
-        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let control = handle_stream_event(
-            Some(Ok(Event::Key(key))),
-            &mut model,
-            &state,
-            &clock,
-            test_area(),
-            &open_ok,
-        );
-
-        assert_eq!(control, LoopControl::Redraw);
-        assert_eq!(
-            state.marked_read_event_keys(),
-            vec![model.timeline[0].event_key()]
-        );
-    }
-
-    #[test]
     fn read_mark_failure_keeps_event_unread_and_sets_status() {
         let state = FakeState::default();
         state.set_mark_read_error(true);
@@ -853,192 +696,24 @@ mod tests {
     }
 
     #[test]
-    fn enter_open_failure_updates_status_and_keeps_loop_alive() {
-        let state = FakeState::default();
-        let clock = FixedClock {
-            now: Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap(),
-        };
-        let mut model = TuiModel::new(10);
-        model.timeline = vec![timeline_event("ev2", clock.now)];
-        model.selected = 0;
-
-        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let control = handle_stream_event(
-            Some(Ok(Event::Key(key))),
-            &mut model,
-            &state,
-            &clock,
-            test_area(),
-            &|_| Err(anyhow!("browser unavailable")),
-        );
-
-        assert_eq!(control, LoopControl::Redraw);
-        assert!(model
-            .status_line
-            .contains("open failed: browser unavailable"));
-        assert_eq!(
-            state.marked_read_event_keys(),
-            vec![model.timeline[0].event_key()]
-        );
-    }
-
-    #[test]
-    fn resize_event_requests_redraw() {
-        let state = FakeState::default();
-        let clock = FixedClock {
-            now: Utc.with_ymd_and_hms(2025, 1, 11, 0, 0, 0).unwrap(),
-        };
-        let mut model = TuiModel::new(10);
-
-        let control = handle_stream_event(
-            Some(Ok(Event::Resize(100, 30))),
-            &mut model,
-            &state,
-            &clock,
-            test_area(),
-            &open_ok,
-        );
-
-        assert_eq!(control, LoopControl::Redraw);
-    }
-
-    #[test]
-    fn resize_event_does_not_mutate_navigation_state() {
-        let state = FakeState::default();
-        let clock = FixedClock {
-            now: Utc.with_ymd_and_hms(2025, 1, 12, 0, 0, 0).unwrap(),
-        };
-        let mut model = TuiModel::new(10);
-        model.status_line = "ready".to_string();
-        model.selected = 3;
-        model.timeline_offset = 2;
-
-        let selected_before = model.selected;
-        let offset_before = model.timeline_offset;
-        let status_before = model.status_line.clone();
-
-        let control = handle_stream_event(
-            Some(Ok(Event::Resize(90, 20))),
-            &mut model,
-            &state,
-            &clock,
-            test_area(),
-            &open_ok,
-        );
-
-        assert_eq!(control, LoopControl::Redraw);
-        assert_eq!(model.selected, selected_before);
-        assert_eq!(model.timeline_offset, offset_before);
-        assert_eq!(model.status_line, status_before);
-    }
-
-    #[test]
-    fn help_toggle_requests_redraw_without_polling() {
-        let state = FakeState::default();
-        let clock = FixedClock {
-            now: Utc.with_ymd_and_hms(2025, 1, 13, 0, 0, 0).unwrap(),
-        };
-        let mut model = TuiModel::new(10);
-        assert!(!model.help_visible);
-
-        let key = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
-        let control = handle_stream_event(
-            Some(Ok(Event::Key(key))),
-            &mut model,
-            &state,
-            &clock,
-            test_area(),
-            &open_ok,
-        );
-
-        assert_eq!(control, LoopControl::Redraw);
-        assert!(model.help_visible);
-    }
-
-    #[test]
-    fn page_down_key_updates_selection() {
-        let state = FakeState::default();
-        let clock = FixedClock {
-            now: Utc.with_ymd_and_hms(2025, 1, 14, 0, 0, 0).unwrap(),
-        };
-        let mut model = TuiModel::new(10);
-        model.timeline_page_size = 2;
-        model.timeline = vec![
-            WatchEvent {
-                event_id: "ev1".to_string(),
-                repo: "acme/api".to_string(),
-                kind: EventKind::IssueCommentCreated,
-                actor: "dev".to_string(),
-                title: "comment".to_string(),
-                url: "https://example.com/ev1".to_string(),
-                created_at: clock.now,
-                source_item_id: "ev1".to_string(),
-                subject_author: Some("dev".to_string()),
-                requested_reviewer: None,
-                mentions: Vec::new(),
-            },
-            WatchEvent {
-                event_id: "ev2".to_string(),
-                repo: "acme/api".to_string(),
-                kind: EventKind::IssueCommentCreated,
-                actor: "dev".to_string(),
-                title: "comment".to_string(),
-                url: "https://example.com/ev2".to_string(),
-                created_at: clock.now,
-                source_item_id: "ev2".to_string(),
-                subject_author: Some("dev".to_string()),
-                requested_reviewer: None,
-                mentions: Vec::new(),
-            },
-            WatchEvent {
-                event_id: "ev3".to_string(),
-                repo: "acme/api".to_string(),
-                kind: EventKind::IssueCommentCreated,
-                actor: "dev".to_string(),
-                title: "comment".to_string(),
-                url: "https://example.com/ev3".to_string(),
-                created_at: clock.now,
-                source_item_id: "ev3".to_string(),
-                subject_author: Some("dev".to_string()),
-                requested_reviewer: None,
-                mentions: Vec::new(),
-            },
-        ];
-
-        let key = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
-        let control = handle_stream_event(
-            Some(Ok(Event::Key(key))),
-            &mut model,
-            &state,
-            &clock,
-            test_area(),
-            &open_ok,
-        );
-
-        assert_eq!(control, LoopControl::Redraw);
-        assert_eq!(model.selected, 2);
-    }
-
-    #[test]
     fn refresh_requested_while_polling_is_queued_without_parallel_start() {
         let mut state = PollExecutionState::default();
+
         assert!(state.request_poll());
+        assert!(!state.request_poll());
+
         assert!(state.start_poll());
+        assert!(state.in_flight());
+
         assert!(!state.request_poll());
         assert!(state.queued_refresh());
-        assert!(state.in_flight());
-    }
 
-    #[test]
-    fn queued_refresh_is_consumed_exactly_once_after_poll_completion() {
-        let mut state = PollExecutionState::default();
-        assert!(state.request_poll());
-        assert!(state.start_poll());
-        assert!(!state.request_poll());
-
-        assert!(state.finish_poll_and_take_next_request());
-        assert!(!state.finish_poll_and_take_next_request());
-        assert!(!state.queued_refresh());
+        let queued_for_next = state.finish_poll_and_take_next_request();
+        assert!(queued_for_next);
         assert!(!state.in_flight());
+        assert!(!state.queued_refresh());
+
+        assert!(state.start_poll());
+        assert!(state.in_flight());
     }
 }

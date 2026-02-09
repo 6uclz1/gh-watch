@@ -567,36 +567,6 @@ mod tests {
         ) -> Result<crate::ports::PersistBatchResult> {
             Ok(crate::ports::PersistBatchResult::default())
         }
-
-        fn load_due_notifications(
-            &self,
-            _now: chrono::DateTime<Utc>,
-            _limit: usize,
-        ) -> Result<Vec<crate::ports::PendingNotification>> {
-            Ok(Vec::new())
-        }
-
-        fn mark_notification_delivered(
-            &self,
-            _event_key: &str,
-            _delivered_at: chrono::DateTime<Utc>,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        fn reschedule_notification(
-            &self,
-            _event_key: &str,
-            _attempts: u32,
-            _next_attempt_at: chrono::DateTime<Utc>,
-            _last_error: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        fn pending_notification_count(&self) -> Result<usize> {
-            Ok(0)
-        }
     }
 
     struct FixedClock {

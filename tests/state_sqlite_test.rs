@@ -169,6 +169,60 @@ VALUES (?1, ?2, ?3)
 }
 
 #[test]
+fn opening_v2_schema_returns_schema_mismatch_error() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "
+CREATE TABLE schema_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE polling_cursors_v2 (
+  repo TEXT PRIMARY KEY,
+  last_polled_at TEXT NOT NULL
+);
+CREATE TABLE event_log_v2 (
+  event_key TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  delivered_at TEXT,
+  read_at TEXT
+);
+CREATE TABLE notification_queue_v2 (
+  event_key TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL,
+  last_error TEXT,
+  enqueued_at TEXT NOT NULL
+);
+CREATE TABLE failure_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  failed_at TEXT NOT NULL,
+  message TEXT NOT NULL
+);
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2');
+",
+    )
+    .unwrap();
+    drop(conn);
+
+    let err = match SqliteStateStore::new(&db) {
+        Ok(_) => panic!("v2 schema should be rejected"),
+        Err(err) => err,
+    };
+    let rendered = format!("{err:#}");
+    assert!(err.downcast_ref::<StateSchemaMismatchError>().is_some());
+    assert!(rendered.contains("init --reset-state"));
+}
+
+#[test]
 fn appended_event_is_unread_until_explicitly_marked_read() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("state.db");
@@ -232,54 +286,7 @@ fn upserting_same_event_key_preserves_read_state() {
 }
 
 #[test]
-fn persist_batch_notification_queue_roundtrip_with_reschedule_and_delivery() {
-    let dir = tempdir().unwrap();
-    let db = dir.path().join("state.db");
-    let store = SqliteStateStore::new(&db).unwrap();
-    let poll_started_at = Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap();
-    let event = sample_event(
-        "queue-1",
-        Utc.with_ymd_and_hms(2025, 1, 9, 23, 59, 0).unwrap(),
-    );
-
-    let batch = RepoPersistBatch {
-        repo: "acme/api".to_string(),
-        poll_started_at,
-        events: vec![event.clone()],
-        queue_notifications: true,
-    };
-    let persisted = store.persist_repo_batch(&batch).unwrap();
-    assert_eq!(persisted.newly_logged_event_keys, vec![event.event_key()]);
-    assert_eq!(persisted.queued_notifications, 1);
-    assert_eq!(store.pending_notification_count().unwrap(), 1);
-
-    let due = store.load_due_notifications(poll_started_at, 10).unwrap();
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].event_key, event.event_key());
-    assert_eq!(due[0].attempts, 0);
-
-    let next_attempt = poll_started_at + Duration::seconds(30);
-    store
-        .reschedule_notification(&event.event_key(), 1, next_attempt, "temporary")
-        .unwrap();
-    assert!(store
-        .load_due_notifications(poll_started_at + Duration::seconds(29), 10)
-        .unwrap()
-        .is_empty());
-
-    let due_again = store.load_due_notifications(next_attempt, 10).unwrap();
-    assert_eq!(due_again.len(), 1);
-    assert_eq!(due_again[0].attempts, 1);
-
-    store
-        .mark_notification_delivered(&event.event_key(), next_attempt)
-        .unwrap();
-    assert_eq!(store.pending_notification_count().unwrap(), 0);
-    assert!(store.is_event_notified(&event.event_key()).unwrap());
-}
-
-#[test]
-fn persist_batch_without_queue_marks_events_delivered_immediately() {
+fn persist_batch_marks_events_delivered_immediately() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("state.db");
     let store = SqliteStateStore::new(&db).unwrap();
@@ -293,10 +300,39 @@ fn persist_batch_without_queue_marks_events_delivered_immediately() {
         repo: "acme/api".to_string(),
         poll_started_at,
         events: vec![event.clone()],
-        queue_notifications: false,
     };
     let persisted = store.persist_repo_batch(&batch).unwrap();
     assert_eq!(persisted.newly_logged_event_keys, vec![event.event_key()]);
-    assert_eq!(store.pending_notification_count().unwrap(), 0);
     assert!(store.is_event_notified(&event.event_key()).unwrap());
+}
+
+#[test]
+fn persist_batch_deduplicates_existing_event_keys() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let store = SqliteStateStore::new(&db).unwrap();
+    let poll_started_at = Utc.with_ymd_and_hms(2025, 1, 12, 0, 0, 0).unwrap();
+    let event = sample_event(
+        "dedupe-1",
+        Utc.with_ymd_and_hms(2025, 1, 11, 23, 0, 0).unwrap(),
+    );
+
+    let first = RepoPersistBatch {
+        repo: "acme/api".to_string(),
+        poll_started_at,
+        events: vec![event.clone()],
+    };
+    let second = RepoPersistBatch {
+        repo: "acme/api".to_string(),
+        poll_started_at: poll_started_at + Duration::minutes(1),
+        events: vec![event.clone()],
+    };
+
+    let first_result = store.persist_repo_batch(&first).unwrap();
+    let second_result = store.persist_repo_batch(&second).unwrap();
+    assert_eq!(
+        first_result.newly_logged_event_keys,
+        vec![event.event_key()]
+    );
+    assert!(second_result.newly_logged_event_keys.is_empty());
 }

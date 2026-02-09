@@ -143,11 +143,6 @@ exit 1
         .success();
 
     let conn = rusqlite::Connection::open(&state_db_path).unwrap();
-    let queued_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM notification_queue_v2", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
     let timeline_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM event_log_v2", [], |row| row.get(0))
         .unwrap();
@@ -159,7 +154,6 @@ exit 1
         )
         .unwrap();
 
-    assert_eq!(queued_count, 0);
     assert_eq!(timeline_count, 0);
     assert_eq!(cursor_after, cursor.to_rfc3339());
 }

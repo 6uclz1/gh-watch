@@ -14,7 +14,7 @@ use gh_watch::domain::events::{EventKind, WatchEvent};
 use gh_watch::domain::failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL};
 use gh_watch::ports::{
     ClockPort, GhClientPort, NotificationClickSupport, NotificationDispatchResult, NotifierPort,
-    PendingNotification, PersistBatchResult, RepoPersistBatch, StateStorePort,
+    PersistBatchResult, RepoPersistBatch, StateStorePort,
 };
 
 type RepoSinceLog = Arc<Mutex<Vec<(String, chrono::DateTime<Utc>)>>>;
@@ -136,21 +136,11 @@ impl GhClientPort for FakeGh {
 #[derive(Clone, Default)]
 struct FakeState {
     cursors: Arc<Mutex<HashMap<String, chrono::DateTime<Utc>>>>,
-    notified: Arc<Mutex<HashMap<String, WatchEvent>>>,
     timeline: Arc<Mutex<Vec<WatchEvent>>>,
     event_log: Arc<Mutex<HashMap<String, WatchEvent>>>,
-    queue: Arc<Mutex<HashMap<String, QueueItem>>>,
     failures: Arc<Mutex<Vec<FailureRecord>>>,
     fail_set_cursor_for: Arc<Mutex<HashSet<String>>>,
     fail_persist_batch_for: Arc<Mutex<HashSet<String>>>,
-}
-
-#[derive(Clone)]
-struct QueueItem {
-    event: WatchEvent,
-    attempts: u32,
-    next_attempt_at: chrono::DateTime<Utc>,
-    last_error: Option<String>,
 }
 
 impl FakeState {
@@ -183,7 +173,7 @@ impl StateStorePort for FakeState {
     }
 
     fn is_event_notified(&self, event_key: &str) -> Result<bool> {
-        Ok(self.notified.lock().unwrap().contains_key(event_key))
+        Ok(self.event_log.lock().unwrap().contains_key(event_key))
     }
 
     fn record_notified_event(
@@ -192,10 +182,6 @@ impl StateStorePort for FakeState {
         _notified_at: chrono::DateTime<Utc>,
     ) -> Result<()> {
         self.event_log
-            .lock()
-            .unwrap()
-            .insert(event.event_key(), event.clone());
-        self.notified
             .lock()
             .unwrap()
             .insert(event.event_key(), event.clone());
@@ -261,9 +247,7 @@ impl StateStorePort for FakeState {
 
         let mut result = PersistBatchResult::default();
         let mut event_log = self.event_log.lock().unwrap();
-        let mut queue = self.queue.lock().unwrap();
         let mut timeline = self.timeline.lock().unwrap();
-        let mut notified = self.notified.lock().unwrap();
 
         for event in &batch.events {
             let event_key = event.event_key();
@@ -272,90 +256,9 @@ impl StateStorePort for FakeState {
                 timeline.push(event.clone());
                 result.newly_logged_event_keys.push(event_key.clone());
             }
-
-            if batch.queue_notifications {
-                if !notified.contains_key(&event_key) && !queue.contains_key(&event_key) {
-                    queue.insert(
-                        event_key.clone(),
-                        QueueItem {
-                            event: event.clone(),
-                            attempts: 0,
-                            next_attempt_at: batch.poll_started_at,
-                            last_error: None,
-                        },
-                    );
-                    result.queued_notifications += 1;
-                }
-            } else {
-                queue.remove(&event_key);
-                notified.insert(event_key, event.clone());
-            }
         }
 
         Ok(result)
-    }
-
-    fn load_due_notifications(
-        &self,
-        now: chrono::DateTime<Utc>,
-        limit: usize,
-    ) -> Result<Vec<PendingNotification>> {
-        let mut items = self
-            .queue
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, item)| item.next_attempt_at <= now)
-            .map(|(event_key, item)| PendingNotification {
-                event_key: event_key.clone(),
-                event: item.event.clone(),
-                attempts: item.attempts,
-                next_attempt_at: item.next_attempt_at,
-            })
-            .collect::<Vec<_>>();
-        items.sort_by_key(|item| item.next_attempt_at);
-        items.truncate(limit);
-        Ok(items)
-    }
-
-    fn mark_notification_delivered(
-        &self,
-        event_key: &str,
-        _delivered_at: chrono::DateTime<Utc>,
-    ) -> Result<()> {
-        let mut queue = self.queue.lock().unwrap();
-        queue.remove(event_key);
-        let event = self
-            .event_log
-            .lock()
-            .unwrap()
-            .get(event_key)
-            .cloned()
-            .ok_or_else(|| anyhow!("missing event for {event_key}"))?;
-        self.notified
-            .lock()
-            .unwrap()
-            .insert(event_key.to_string(), event);
-        Ok(())
-    }
-
-    fn reschedule_notification(
-        &self,
-        event_key: &str,
-        attempts: u32,
-        next_attempt_at: chrono::DateTime<Utc>,
-        last_error: &str,
-    ) -> Result<()> {
-        if let Some(item) = self.queue.lock().unwrap().get_mut(event_key) {
-            item.attempts = attempts;
-            item.next_attempt_at = next_attempt_at;
-            item.last_error = Some(last_error.to_string());
-        }
-        Ok(())
-    }
-
-    fn pending_notification_count(&self) -> Result<usize> {
-        Ok(self.queue.lock().unwrap().len())
     }
 }
 
@@ -446,9 +349,6 @@ fn cfg() -> Config {
         notifications: NotificationConfig {
             enabled: true,
             include_url: true,
-            macos_bundle_id: None,
-            windows_app_id: None,
-            wsl_windows_app_id: None,
         },
         filters: FiltersConfig::default(),
         poll: PollConfig {
@@ -1071,7 +971,7 @@ async fn repo_state_write_failure_does_not_block_other_repositories() {
 }
 
 #[tokio::test]
-async fn notification_queue_retries_on_next_poll_and_succeeds() {
+async fn notification_failure_is_not_retried_on_next_poll() {
     let event_time = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
     let first = sample_event_at("acme/api", "123", event_time);
     let second = sample_event_at("acme/api", "456", event_time);
@@ -1105,10 +1005,6 @@ async fn notification_queue_retries_on_next_poll_and_succeeds() {
     let c2 = FixedClock {
         now: Utc.with_ymd_and_hms(2025, 1, 4, 0, 0, 0).unwrap(),
     };
-    let c3 = FixedClock {
-        now: Utc.with_ymd_and_hms(2025, 1, 5, 0, 0, 0).unwrap(),
-    };
-
     let out1 = poll_once(&cfg(), &gh, &state, &notifier, &c1)
         .await
         .unwrap();
@@ -1116,7 +1012,6 @@ async fn notification_queue_retries_on_next_poll_and_succeeds() {
     assert_eq!(out1.repo_errors.len(), 1);
     assert_eq!(out1.failures.len(), 1);
     assert_eq!(out1.timeline_events.len(), 2);
-    assert_eq!(out1.pending_notification_count, 1);
     assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c1.now);
     assert_eq!(notifier.attempts_for(&first.event_key()), 1);
     assert_eq!(notifier.attempts_for(&second.event_key()), 1);
@@ -1124,28 +1019,21 @@ async fn notification_queue_retries_on_next_poll_and_succeeds() {
     let out2 = poll_once(&cfg(), &gh, &state, &notifier, &c2)
         .await
         .unwrap();
-    assert_eq!(out2.notified_count, 1);
+    assert_eq!(out2.notified_count, 0);
     assert!(out2.repo_errors.is_empty());
     assert!(out2.failures.is_empty());
     assert!(out2.timeline_events.is_empty());
-    assert_eq!(out2.pending_notification_count, 0);
     assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c2.now);
-
-    let out3 = poll_once(&cfg(), &gh, &state, &notifier, &c3)
-        .await
-        .unwrap();
-    assert_eq!(out3.notified_count, 0);
-    assert!(out3.repo_errors.is_empty());
-    assert!(out3.failures.is_empty());
+    assert_eq!(notifier.attempts_for(&second.event_key()), 1);
 
     assert_eq!(
         notifier.sent.lock().unwrap().as_slice(),
-        &[first.event_key(), second.event_key()]
+        &[first.event_key()]
     );
 }
 
 #[tokio::test]
-async fn retry_exhausted_still_reflects_timeline_and_keeps_future_retry() {
+async fn retry_exhausted_still_reflects_timeline_without_future_retry() {
     let event_time = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
     let first = sample_event_at("acme/api", "123", event_time);
     let second = sample_event_at("acme/api", "456", event_time);
@@ -1189,21 +1077,18 @@ async fn retry_exhausted_still_reflects_timeline_and_keeps_future_retry() {
     assert_eq!(out1.failures[0].kind, FAILURE_KIND_NOTIFICATION);
     assert_eq!(out1.timeline_events.len(), 2);
     assert_eq!(state.timeline.lock().unwrap().len(), 2);
-    assert_eq!(state.notified.lock().unwrap().len(), 1);
     assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c1.now);
     assert_eq!(notifier.attempts_for(&second.event_key()), 1);
-    assert_eq!(out1.pending_notification_count, 1);
 
     let out2 = poll_once(&cfg(), &gh, &state, &notifier, &c2)
         .await
         .unwrap();
     assert_eq!(out2.notified_count, 0);
-    assert_eq!(out2.repo_errors.len(), 1);
-    assert_eq!(out2.failures.len(), 1);
+    assert!(out2.repo_errors.is_empty());
+    assert!(out2.failures.is_empty());
     assert!(out2.timeline_events.is_empty());
     assert_eq!(state.timeline.lock().unwrap().len(), 2);
-    assert_eq!(notifier.attempts_for(&second.event_key()), 2);
-    assert_eq!(out2.pending_notification_count, 1);
+    assert_eq!(notifier.attempts_for(&second.event_key()), 1);
 }
 
 #[tokio::test]

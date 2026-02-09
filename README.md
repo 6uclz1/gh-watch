@@ -11,7 +11,7 @@ Reliable GitHub watcher with desktop notifications and a terminal timeline UI.
 1. Watch multiple repositories from one config.
 2. Get notifications for PRs/issues/comments and review/merge events.
 3. Avoid duplicate alerts across restarts with SQLite-backed event keys.
-4. Keep resilience: failed notifications are retried once per poll, while timeline reflection is prioritized.
+4. Keep behavior simple: each newly observed event is notified at most once.
 
 ## Demo
 
@@ -122,9 +122,9 @@ Global filter keys:
 - First run bootstraps cursor and does not notify.
 - Polling uses a fixed 5-minute overlap (`since = last_cursor - 300s`) to reduce boundary misses.
 - Per-repository cursor is updated to poll start time (not post-processing `now`).
-- New events are durably persisted first, then notifications are sent from `notification_queue_v2`.
-- Notification failures remain pending and are retried in future polls with backoff.
-- `event_key` deduplicates overlap re-fetches while preserving at-least-once delivery behavior.
+- New events are durably persisted first, then notified immediately in the same poll cycle.
+- Notification failures are recorded in `failure_events` and are not retried automatically.
+- `event_key` deduplicates overlap re-fetches and prevents re-notifying already logged events.
 - Repository-level failures do not block other repositories.
 
 ## TUI Key Bindings
@@ -162,24 +162,16 @@ Use `config.example.toml` as a shareable template.
 
 If your `state.db` was created by an older release, run `gh-watch init --reset-state`.
 
-## Notification Sender IDs
+Notification config keys:
 
-- macOS:
-  - `notifications.macos_bundle_id` を指定可能（未指定時の既定値: `com.apple.Terminal`）
-  - 未指定時は `check` / `watch` 起動時に警告を表示
-- Windows:
-  - `notifications.windows_app_id` を指定可能
-  - 未指定時の既定値は PowerShell の AppUserModelID（`Toast::POWERSHELL_APP_ID`）
-  - 未指定時は `check` / `watch` 起動時に警告を表示
-- WSL (Linux build running inside WSL):
-  - 通知は Linux デスクトップ通知ではなく `powershell.exe` 経由の Windows Toast を使用
-  - `notifications.wsl_windows_app_id` を指定可能（WSL時は `notifications.windows_app_id` を参照しない）
-  - 未指定時の既定値は PowerShell の AppUserModelID
-  - Toast 送信失敗時は `stderr` を優先し、`stderr` が空の場合は `stdout` を warning に含める
-  - `powershell.exe` が利用できない場合:
-    - `gh-watch check` は失敗終了
-    - `gh-watch doctor` / `gh-watch watch` / `gh-watch once` は warning を表示して継続
-- いずれも、最終的なバナー表示有無は OS 側の通知設定に依存
+- `[notifications].enabled`
+- `[notifications].include_url`
+
+## Notification Backend
+
+- macOS: notifications are sent via `osascript` (`display notification`).
+- Non-macOS: notifier runs in noop mode and prints a startup warning.
+- Banner visibility still depends on OS notification settings / focus mode.
 
 ## Developer Quality Gates
 

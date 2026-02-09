@@ -14,7 +14,6 @@ use crate::{
 };
 
 const POLL_OVERLAP_SECONDS: i64 = 300;
-const NOTIFICATION_QUEUE_DRAIN_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PollOutcome {
@@ -24,7 +23,6 @@ pub struct PollOutcome {
     pub failures: Vec<FailureRecord>,
     pub notified_events: Vec<WatchEvent>,
     pub timeline_events: Vec<WatchEvent>,
-    pub pending_notification_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -119,11 +117,6 @@ where
         }
     }
 
-    drain_notification_queue(&processing_context, &mut outcome);
-    outcome.pending_notification_count = state.pending_notification_count().with_context(|| {
-        "failed to load pending notification count after queue drain".to_string()
-    })?;
-
     Ok(outcome)
 }
 
@@ -169,7 +162,6 @@ where
                     repo: repo.name.clone(),
                     poll_started_at,
                     events: Vec::new(),
-                    queue_notifications: false,
                 };
                 if let Err(err) = state.persist_repo_batch(&batch) {
                     record_repo_poll_failure(
@@ -284,7 +276,6 @@ where
         repo: plan.repo_name.clone(),
         poll_started_at: plan.poll_started_at,
         events: events.clone(),
-        queue_notifications: !plan.is_bootstrap && context.config.notifications.enabled,
     };
     let persist_result = context
         .state
@@ -295,128 +286,53 @@ where
         .newly_logged_event_keys
         .into_iter()
         .collect::<HashSet<_>>();
-    outcome.timeline_events.extend(
-        events
-            .into_iter()
-            .filter(|event| newly_logged.contains(&event.event_key())),
-    );
+    let newly_logged_events = events
+        .into_iter()
+        .filter(|event| newly_logged.contains(&event.event_key()))
+        .collect::<Vec<_>>();
+    outcome.timeline_events.extend(newly_logged_events.clone());
 
-    Ok(())
-}
-
-fn drain_notification_queue<S, N, K>(
-    context: &RepoEventProcessingContext<'_, S, N, K>,
-    outcome: &mut PollOutcome,
-) where
-    S: StateStorePort,
-    N: NotifierPort,
-    K: ClockPort,
-{
-    if !context.config.notifications.enabled {
-        return;
+    if plan.is_bootstrap || !context.config.notifications.enabled {
+        return Ok(());
     }
 
-    let now = context.clock.now();
-    let due_items = match context
-        .state
-        .load_due_notifications(now, NOTIFICATION_QUEUE_DRAIN_LIMIT)
-    {
-        Ok(items) => items,
-        Err(err) => {
-            record_repo_poll_failure(
-                context.state,
-                context.clock,
-                outcome,
-                "<notification_queue>",
-                format!("failed to load due notifications: {err:#}").as_str(),
-            );
-            return;
-        }
-    };
-
-    for pending in due_items {
+    for event in newly_logged_events {
         match context
             .notifier
-            .notify(&pending.event, context.config.notifications.include_url)
+            .notify(&event, context.config.notifications.include_url)
         {
             Ok(_) => {
-                if let Err(err) = context
-                    .state
-                    .mark_notification_delivered(&pending.event_key, now)
-                {
-                    record_repo_poll_failure(
-                        context.state,
-                        context.clock,
-                        outcome,
-                        pending.event.repo.as_str(),
-                        format!(
-                            "notification delivered but failed to persist delivery state for {}: {err:#}",
-                            pending.event_key
-                        )
-                        .as_str(),
-                    );
-                    continue;
-                }
                 outcome.notified_count += 1;
-                outcome.notified_events.push(pending.event);
+                outcome.notified_events.push(event);
             }
             Err(err) => {
-                let attempts = pending.attempts.saturating_add(1);
-                let next_attempt_at =
-                    now + Duration::seconds(notification_retry_backoff_seconds(attempts) as i64);
-                let err_message = err.to_string();
-
-                if let Err(reschedule_err) = context.state.reschedule_notification(
-                    &pending.event_key,
-                    attempts,
-                    next_attempt_at,
-                    &err_message,
-                ) {
-                    record_repo_poll_failure(
-                        context.state,
-                        context.clock,
-                        outcome,
-                        pending.event.repo.as_str(),
-                        format!(
-                            "failed to reschedule notification for {}: {reschedule_err:#}",
-                            pending.event_key
-                        )
-                        .as_str(),
-                    );
-                }
-
                 let failure = FailureRecord::new(
                     FAILURE_KIND_NOTIFICATION,
-                    pending.event.repo.clone(),
+                    event.repo.clone(),
                     context.clock.now(),
-                    format!("{}: {}", pending.event_key, err_message),
+                    format!("{}: {}", event.event_key(), err),
                 );
                 if let Err(record_err) = context.state.record_failure(&failure) {
                     outcome.repo_errors.push(format!(
                         "{}: notification failed for {} but failure record persistence failed: {}",
-                        pending.event.repo, pending.event_key, record_err
+                        event.repo,
+                        event.event_key(),
+                        record_err
                     ));
                 } else {
                     outcome.failures.push(failure);
                     outcome.repo_errors.push(format!(
                         "{}: notification failed for {}: {}",
-                        pending.event.repo, pending.event_key, err_message
+                        event.repo,
+                        event.event_key(),
+                        err
                     ));
                 }
             }
         }
     }
-}
 
-fn notification_retry_backoff_seconds(attempts: u32) -> u64 {
-    match attempts {
-        0 => 0,
-        1 => 30,
-        2 => 120,
-        3 => 600,
-        4 => 3600,
-        _ => 21600,
-    }
+    Ok(())
 }
 
 fn record_repo_poll_failure<S, K>(

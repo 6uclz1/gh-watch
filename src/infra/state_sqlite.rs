@@ -6,10 +6,10 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 
 use crate::{
     domain::{events::WatchEvent, failure::FailureRecord},
-    ports::{PendingNotification, PersistBatchResult, RepoPersistBatch, StateStorePort},
+    ports::{PersistBatchResult, RepoPersistBatch, StateStorePort},
 };
 
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 
 #[derive(Debug)]
 pub struct StateSchemaMismatchError {
@@ -60,7 +60,7 @@ impl SqliteStateStore {
 
     fn ensure_schema(path: &Path, conn: &Connection) -> Result<()> {
         if !Self::has_non_internal_tables(conn)? {
-            Self::init_schema_v2(conn)?;
+            Self::init_schema_v3(conn)?;
             return Ok(());
         }
 
@@ -118,12 +118,7 @@ SELECT EXISTS(
             return Ok(false);
         }
 
-        for table in [
-            "polling_cursors_v2",
-            "event_log_v2",
-            "notification_queue_v2",
-            "failure_events",
-        ] {
+        for table in ["polling_cursors_v2", "event_log_v2", "failure_events"] {
             if !Self::table_exists(conn, table)? {
                 return Ok(false);
             }
@@ -132,7 +127,7 @@ SELECT EXISTS(
         Ok(true)
     }
 
-    fn init_schema_v2(conn: &Connection) -> Result<()> {
+    fn init_schema_v3(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -157,19 +152,6 @@ CREATE TABLE IF NOT EXISTS event_log_v2 (
 
 CREATE INDEX IF NOT EXISTS idx_event_log_v2_created_at
 ON event_log_v2 (created_at DESC);
-
-CREATE TABLE IF NOT EXISTS notification_queue_v2 (
-  event_key TEXT PRIMARY KEY,
-  repo TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at TEXT NOT NULL,
-  last_error TEXT,
-  enqueued_at TEXT NOT NULL,
-  FOREIGN KEY(event_key) REFERENCES event_log_v2(event_key) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_notification_queue_v2_next_attempt_at
-ON notification_queue_v2 (next_attempt_at ASC);
 
 CREATE TABLE IF NOT EXISTS failure_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -302,10 +284,9 @@ ON CONFLICT(repo) DO UPDATE SET last_polled_at = excluded.last_polled_at
     }
 
     fn record_notified_event(&self, event: &WatchEvent, notified_at: DateTime<Utc>) -> Result<()> {
-        let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let tx = conn.transaction()?;
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let payload = serde_json::to_string(event)?;
-        tx.execute(
+        conn.execute(
             "
 INSERT INTO event_log_v2
   (event_key, repo, payload_json, created_at, observed_at, delivered_at, read_at)
@@ -326,11 +307,6 @@ ON CONFLICT(event_key) DO UPDATE SET
                 notified_at.to_rfc3339(),
             ],
         )?;
-        tx.execute(
-            "DELETE FROM notification_queue_v2 WHERE event_key = ?1",
-            params![event.event_key()],
-        )?;
-        tx.commit()?;
         Ok(())
     }
 
@@ -520,149 +496,16 @@ VALUES
                     payload,
                     event.created_at.to_rfc3339(),
                     batch.poll_started_at.to_rfc3339(),
-                    if batch.queue_notifications {
-                        None::<String>
-                    } else {
-                        Some(batch.poll_started_at.to_rfc3339())
-                    },
+                    batch.poll_started_at.to_rfc3339(),
                 ],
             )?;
 
             if inserted == 1 {
                 result.newly_logged_event_keys.push(event_key.clone());
             }
-
-            if batch.queue_notifications {
-                let queued = tx.execute(
-                    "
-INSERT INTO notification_queue_v2
-  (event_key, repo, attempts, next_attempt_at, last_error, enqueued_at)
-SELECT event_key, repo, 0, ?2, NULL, ?2
-FROM event_log_v2
-WHERE event_key = ?1
-  AND delivered_at IS NULL
-ON CONFLICT(event_key) DO NOTHING
-",
-                    params![event_key, batch.poll_started_at.to_rfc3339()],
-                )?;
-                result.queued_notifications += queued;
-            } else {
-                tx.execute(
-                    "
-UPDATE event_log_v2
-SET delivered_at = COALESCE(delivered_at, ?2)
-WHERE event_key = ?1
-",
-                    params![event_key, batch.poll_started_at.to_rfc3339()],
-                )?;
-                tx.execute(
-                    "DELETE FROM notification_queue_v2 WHERE event_key = ?1",
-                    params![event_key],
-                )?;
-            }
         }
 
         tx.commit()?;
         Ok(result)
-    }
-
-    fn load_due_notifications(
-        &self,
-        now: DateTime<Utc>,
-        limit: usize,
-    ) -> Result<Vec<PendingNotification>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let mut stmt = conn.prepare(
-            "
-SELECT q.event_key, e.payload_json, q.attempts, q.next_attempt_at
-FROM notification_queue_v2 q
-INNER JOIN event_log_v2 e
-  ON e.event_key = q.event_key
-WHERE q.next_attempt_at <= ?1
-ORDER BY q.next_attempt_at ASC
-LIMIT ?2
-",
-        )?;
-
-        let rows = stmt.query_map(params![now.to_rfc3339(), limit as i64], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-
-        rows.map(|row| -> Result<PendingNotification> {
-            let (event_key, payload, attempts, next_attempt_at) = row?;
-            let event = serde_json::from_str::<WatchEvent>(&payload)?;
-            let next_attempt_at =
-                DateTime::parse_from_rfc3339(&next_attempt_at)?.with_timezone(&Utc);
-            Ok(PendingNotification {
-                event_key,
-                event,
-                attempts: attempts.max(0) as u32,
-                next_attempt_at,
-            })
-        })
-        .collect::<Result<Vec<_>>>()
-    }
-
-    fn mark_notification_delivered(
-        &self,
-        event_key: &str,
-        delivered_at: DateTime<Utc>,
-    ) -> Result<()> {
-        let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let tx = conn.transaction()?;
-        tx.execute(
-            "
-UPDATE event_log_v2
-SET delivered_at = COALESCE(delivered_at, ?2)
-WHERE event_key = ?1
-",
-            params![event_key, delivered_at.to_rfc3339()],
-        )?;
-        tx.execute(
-            "DELETE FROM notification_queue_v2 WHERE event_key = ?1",
-            params![event_key],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    fn reschedule_notification(
-        &self,
-        event_key: &str,
-        attempts: u32,
-        next_attempt_at: DateTime<Utc>,
-        last_error: &str,
-    ) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        conn.execute(
-            "
-UPDATE notification_queue_v2
-SET attempts = ?2,
-    next_attempt_at = ?3,
-    last_error = ?4
-WHERE event_key = ?1
-",
-            params![
-                event_key,
-                attempts as i64,
-                next_attempt_at.to_rfc3339(),
-                last_error
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn pending_notification_count(&self) -> Result<usize> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM notification_queue_v2", [], |row| {
-                row.get(0)
-            })?;
-        Ok(count.max(0) as usize)
     }
 }

@@ -80,17 +80,12 @@ pub struct RepositoryConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NotificationConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub include_url: bool,
-    #[serde(default)]
-    pub macos_bundle_id: Option<String>,
-    #[serde(default)]
-    pub windows_app_id: Option<String>,
-    #[serde(default)]
-    pub wsl_windows_app_id: Option<String>,
 }
 
 impl Default for NotificationConfig {
@@ -98,9 +93,6 @@ impl Default for NotificationConfig {
         Self {
             enabled: true,
             include_url: true,
-            macos_bundle_id: None,
-            windows_app_id: None,
-            wsl_windows_app_id: None,
         }
     }
 }

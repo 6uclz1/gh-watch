@@ -14,8 +14,10 @@ use gh_watch::domain::events::{EventKind, WatchEvent};
 use gh_watch::domain::failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL};
 use gh_watch::ports::{
     ClockPort, GhClientPort, NotificationClickSupport, NotificationDispatchResult, NotifierPort,
-    StateStorePort,
+    PendingNotification, PersistBatchResult, RepoPersistBatch, StateStorePort,
 };
+
+type RepoSinceLog = Arc<Mutex<Vec<(String, chrono::DateTime<Utc>)>>>;
 
 #[derive(Clone)]
 struct FakeGh {
@@ -25,6 +27,7 @@ struct FakeGh {
     in_flight: Arc<AtomicUsize>,
     max_in_flight: Arc<AtomicUsize>,
     fetched_repos: Arc<Mutex<Vec<String>>>,
+    fetched_since: RepoSinceLog,
     viewer_login: Arc<Mutex<String>>,
     viewer_login_error: Arc<Mutex<Option<String>>>,
 }
@@ -38,6 +41,7 @@ impl Default for FakeGh {
             in_flight: Arc::new(AtomicUsize::new(0)),
             max_in_flight: Arc::new(AtomicUsize::new(0)),
             fetched_repos: Arc::new(Mutex::new(Vec::new())),
+            fetched_since: Arc::new(Mutex::new(Vec::new())),
             viewer_login: Arc::new(Mutex::new("alice".to_string())),
             viewer_login_error: Arc::new(Mutex::new(None)),
         }
@@ -55,6 +59,16 @@ impl FakeGh {
 
     fn fetched_repos(&self) -> Vec<String> {
         self.fetched_repos.lock().unwrap().clone()
+    }
+
+    fn fetched_since(&self, repo: &str) -> Vec<chrono::DateTime<Utc>> {
+        self.fetched_since
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == repo)
+            .map(|(_, since)| since.to_owned())
+            .collect()
     }
 }
 
@@ -74,11 +88,15 @@ impl GhClientPort for FakeGh {
     async fn fetch_repo_events(
         &self,
         repo: &str,
-        _since: chrono::DateTime<Utc>,
+        since: chrono::DateTime<Utc>,
     ) -> Result<Vec<WatchEvent>> {
         let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_in_flight.fetch_max(in_flight, Ordering::SeqCst);
         self.fetched_repos.lock().unwrap().push(repo.to_string());
+        self.fetched_since
+            .lock()
+            .unwrap()
+            .push((repo.to_string(), since));
 
         let delay = {
             let delays = self.delays.lock().unwrap();
@@ -104,7 +122,10 @@ impl GhClientPort for FakeGh {
                 .unwrap()
                 .get(repo)
                 .cloned()
-                .unwrap_or_default())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|event| event.created_at > since)
+                .collect())
         };
 
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -117,13 +138,31 @@ struct FakeState {
     cursors: Arc<Mutex<HashMap<String, chrono::DateTime<Utc>>>>,
     notified: Arc<Mutex<HashMap<String, WatchEvent>>>,
     timeline: Arc<Mutex<Vec<WatchEvent>>>,
+    event_log: Arc<Mutex<HashMap<String, WatchEvent>>>,
+    queue: Arc<Mutex<HashMap<String, QueueItem>>>,
     failures: Arc<Mutex<Vec<FailureRecord>>>,
     fail_set_cursor_for: Arc<Mutex<HashSet<String>>>,
+    fail_persist_batch_for: Arc<Mutex<HashSet<String>>>,
+}
+
+#[derive(Clone)]
+struct QueueItem {
+    event: WatchEvent,
+    attempts: u32,
+    next_attempt_at: chrono::DateTime<Utc>,
+    last_error: Option<String>,
 }
 
 impl FakeState {
     fn fail_set_cursor_for(&self, repo: &str) {
         self.fail_set_cursor_for
+            .lock()
+            .unwrap()
+            .insert(repo.to_string());
+    }
+
+    fn fail_persist_batch_for(&self, repo: &str) {
+        self.fail_persist_batch_for
             .lock()
             .unwrap()
             .insert(repo.to_string());
@@ -152,6 +191,10 @@ impl StateStorePort for FakeState {
         event: &WatchEvent,
         _notified_at: chrono::DateTime<Utc>,
     ) -> Result<()> {
+        self.event_log
+            .lock()
+            .unwrap()
+            .insert(event.event_key(), event.clone());
         self.notified
             .lock()
             .unwrap()
@@ -160,6 +203,10 @@ impl StateStorePort for FakeState {
     }
 
     fn append_timeline_event(&self, event: &WatchEvent) -> Result<()> {
+        self.event_log
+            .lock()
+            .unwrap()
+            .insert(event.event_key(), event.clone());
         self.timeline.lock().unwrap().push(event.clone());
         Ok(())
     }
@@ -199,6 +246,116 @@ impl StateStorePort for FakeState {
         _now: chrono::DateTime<Utc>,
     ) -> Result<()> {
         Ok(())
+    }
+
+    fn persist_repo_batch(&self, batch: &RepoPersistBatch) -> Result<PersistBatchResult> {
+        if self
+            .fail_persist_batch_for
+            .lock()
+            .unwrap()
+            .contains(&batch.repo)
+        {
+            return Err(anyhow!("persist batch failed for {}", batch.repo));
+        }
+        self.set_cursor(&batch.repo, batch.poll_started_at)?;
+
+        let mut result = PersistBatchResult::default();
+        let mut event_log = self.event_log.lock().unwrap();
+        let mut queue = self.queue.lock().unwrap();
+        let mut timeline = self.timeline.lock().unwrap();
+        let mut notified = self.notified.lock().unwrap();
+
+        for event in &batch.events {
+            let event_key = event.event_key();
+            if !event_log.contains_key(&event_key) {
+                event_log.insert(event_key.clone(), event.clone());
+                timeline.push(event.clone());
+                result.newly_logged_event_keys.push(event_key.clone());
+            }
+
+            if batch.queue_notifications {
+                if !notified.contains_key(&event_key) && !queue.contains_key(&event_key) {
+                    queue.insert(
+                        event_key.clone(),
+                        QueueItem {
+                            event: event.clone(),
+                            attempts: 0,
+                            next_attempt_at: batch.poll_started_at,
+                            last_error: None,
+                        },
+                    );
+                    result.queued_notifications += 1;
+                }
+            } else {
+                queue.remove(&event_key);
+                notified.insert(event_key, event.clone());
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn load_due_notifications(
+        &self,
+        now: chrono::DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<PendingNotification>> {
+        let mut items = self
+            .queue
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, item)| item.next_attempt_at <= now)
+            .map(|(event_key, item)| PendingNotification {
+                event_key: event_key.clone(),
+                event: item.event.clone(),
+                attempts: item.attempts,
+                next_attempt_at: item.next_attempt_at,
+            })
+            .collect::<Vec<_>>();
+        items.sort_by_key(|item| item.next_attempt_at);
+        items.truncate(limit);
+        Ok(items)
+    }
+
+    fn mark_notification_delivered(
+        &self,
+        event_key: &str,
+        _delivered_at: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let mut queue = self.queue.lock().unwrap();
+        queue.remove(event_key);
+        let event = self
+            .event_log
+            .lock()
+            .unwrap()
+            .get(event_key)
+            .cloned()
+            .ok_or_else(|| anyhow!("missing event for {event_key}"))?;
+        self.notified
+            .lock()
+            .unwrap()
+            .insert(event_key.to_string(), event);
+        Ok(())
+    }
+
+    fn reschedule_notification(
+        &self,
+        event_key: &str,
+        attempts: u32,
+        next_attempt_at: chrono::DateTime<Utc>,
+        last_error: &str,
+    ) -> Result<()> {
+        if let Some(item) = self.queue.lock().unwrap().get_mut(event_key) {
+            item.attempts = attempts;
+            item.next_attempt_at = next_attempt_at;
+            item.last_error = Some(last_error.to_string());
+        }
+        Ok(())
+    }
+
+    fn pending_notification_count(&self) -> Result<usize> {
+        Ok(self.queue.lock().unwrap().len())
     }
 }
 
@@ -383,13 +540,14 @@ async fn bootstrap_does_not_notify_and_sets_cursor() {
 #[tokio::test]
 async fn bootstrap_lookback_populates_timeline_without_notifications() {
     let gh = FakeGh::default();
+    let event_time = Utc.with_ymd_and_hms(2025, 1, 2, 0, 1, 0).unwrap();
     gh.repos.lock().unwrap().insert(
         "acme/api".to_string(),
-        vec![sample_event("acme/api", "boot-api")],
+        vec![sample_event_at("acme/api", "boot-api", event_time)],
     );
     gh.repos.lock().unwrap().insert(
         "acme/web".to_string(),
-        vec![sample_event("acme/web", "boot-web")],
+        vec![sample_event_at("acme/web", "boot-web", event_time)],
     );
     let state = FakeState::default();
     let notifier = FakeNotifier::default();
@@ -482,6 +640,64 @@ async fn second_poll_notifies_new_events_once() {
 
     assert_eq!(out1.notified_count, 1);
     assert_eq!(out2.notified_count, 0);
+}
+
+#[tokio::test]
+async fn fixed_overlap_catches_late_visible_event_without_notification_miss() {
+    let gh = FakeGh::default();
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 5, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 5, 0).unwrap(),
+        )
+        .unwrap();
+
+    let notifier = FakeNotifier::default();
+    let first_clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 1, 0, 10, 0).unwrap(),
+    };
+    let second_clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 1, 0, 15, 0).unwrap(),
+    };
+
+    let first = poll_once(&cfg(), &gh, &state, &notifier, &first_clock)
+        .await
+        .unwrap();
+    assert_eq!(first.notified_count, 0);
+
+    let late_event = sample_event_at(
+        "acme/api",
+        "late-visible",
+        Utc.with_ymd_and_hms(2025, 1, 1, 0, 7, 0).unwrap(),
+    );
+    gh.repos
+        .lock()
+        .unwrap()
+        .insert("acme/api".to_string(), vec![late_event.clone()]);
+
+    let second = poll_once(&cfg(), &gh, &state, &notifier, &second_clock)
+        .await
+        .unwrap();
+    assert_eq!(second.notified_count, 1);
+    assert_eq!(second.timeline_events.len(), 1);
+    assert_eq!(
+        notifier.sent.lock().unwrap().as_slice(),
+        &[late_event.event_key()]
+    );
+
+    let since_calls = gh.fetched_since("acme/api");
+    assert_eq!(since_calls.len(), 2);
+    assert_eq!(
+        since_calls[1],
+        first_clock.now - chrono::Duration::seconds(300)
+    );
 }
 
 #[tokio::test]
@@ -806,7 +1022,56 @@ async fn repo_failure_does_not_block_others() {
 }
 
 #[tokio::test]
-async fn retry_once_then_success_in_same_poll() {
+async fn repo_state_write_failure_does_not_block_other_repositories() {
+    let gh = FakeGh::default();
+    let api_event = sample_event("acme/api", "api-fail");
+    let web_event = sample_event("acme/web", "web-ok");
+    gh.repos
+        .lock()
+        .unwrap()
+        .insert("acme/api".to_string(), vec![api_event]);
+    gh.repos
+        .lock()
+        .unwrap()
+        .insert("acme/web".to_string(), vec![web_event.clone()]);
+
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state.fail_persist_batch_for("acme/api");
+
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
+    };
+
+    let out = poll_once(&cfg(), &gh, &state, &notifier, &clock)
+        .await
+        .unwrap();
+
+    assert_eq!(out.notified_count, 1);
+    assert_eq!(out.repo_errors.len(), 1);
+    assert!(out.repo_errors[0].contains("acme/api"));
+    assert_eq!(out.failures.len(), 1);
+    assert_eq!(out.failures[0].repo, "acme/api");
+    assert_eq!(
+        notifier.sent.lock().unwrap().as_slice(),
+        &[web_event.event_key()]
+    );
+}
+
+#[tokio::test]
+async fn notification_queue_retries_on_next_poll_and_succeeds() {
     let event_time = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
     let first = sample_event_at("acme/api", "123", event_time);
     let second = sample_event_at("acme/api", "456", event_time);
@@ -847,21 +1112,23 @@ async fn retry_once_then_success_in_same_poll() {
     let out1 = poll_once(&cfg(), &gh, &state, &notifier, &c1)
         .await
         .unwrap();
-    assert_eq!(out1.notified_count, 2);
-    assert!(out1.repo_errors.is_empty());
-    assert!(out1.failures.is_empty());
+    assert_eq!(out1.notified_count, 1);
+    assert_eq!(out1.repo_errors.len(), 1);
+    assert_eq!(out1.failures.len(), 1);
     assert_eq!(out1.timeline_events.len(), 2);
+    assert_eq!(out1.pending_notification_count, 1);
     assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c1.now);
     assert_eq!(notifier.attempts_for(&first.event_key()), 1);
-    assert_eq!(notifier.attempts_for(&second.event_key()), 2);
+    assert_eq!(notifier.attempts_for(&second.event_key()), 1);
 
     let out2 = poll_once(&cfg(), &gh, &state, &notifier, &c2)
         .await
         .unwrap();
-    assert_eq!(out2.notified_count, 0);
+    assert_eq!(out2.notified_count, 1);
     assert!(out2.repo_errors.is_empty());
     assert!(out2.failures.is_empty());
     assert!(out2.timeline_events.is_empty());
+    assert_eq!(out2.pending_notification_count, 0);
     assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c2.now);
 
     let out3 = poll_once(&cfg(), &gh, &state, &notifier, &c3)
@@ -878,7 +1145,7 @@ async fn retry_once_then_success_in_same_poll() {
 }
 
 #[tokio::test]
-async fn retry_exhausted_still_reflects_timeline_and_stops_future_retry() {
+async fn retry_exhausted_still_reflects_timeline_and_keeps_future_retry() {
     let event_time = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
     let first = sample_event_at("acme/api", "123", event_time);
     let second = sample_event_at("acme/api", "456", event_time);
@@ -922,19 +1189,21 @@ async fn retry_exhausted_still_reflects_timeline_and_stops_future_retry() {
     assert_eq!(out1.failures[0].kind, FAILURE_KIND_NOTIFICATION);
     assert_eq!(out1.timeline_events.len(), 2);
     assert_eq!(state.timeline.lock().unwrap().len(), 2);
-    assert_eq!(state.notified.lock().unwrap().len(), 2);
+    assert_eq!(state.notified.lock().unwrap().len(), 1);
     assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c1.now);
-    assert_eq!(notifier.attempts_for(&second.event_key()), 2);
+    assert_eq!(notifier.attempts_for(&second.event_key()), 1);
+    assert_eq!(out1.pending_notification_count, 1);
 
     let out2 = poll_once(&cfg(), &gh, &state, &notifier, &c2)
         .await
         .unwrap();
     assert_eq!(out2.notified_count, 0);
-    assert!(out2.repo_errors.is_empty());
-    assert!(out2.failures.is_empty());
+    assert_eq!(out2.repo_errors.len(), 1);
+    assert_eq!(out2.failures.len(), 1);
     assert!(out2.timeline_events.is_empty());
     assert_eq!(state.timeline.lock().unwrap().len(), 2);
     assert_eq!(notifier.attempts_for(&second.event_key()), 2);
+    assert_eq!(out2.pending_notification_count, 1);
 }
 
 #[tokio::test]
@@ -997,13 +1266,14 @@ async fn cursor_update_failure_has_repo_and_root_cause() {
         now: Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
     };
 
-    let err = poll_once(&cfg(), &gh, &state, &notifier, &clock)
+    let out = poll_once(&cfg(), &gh, &state, &notifier, &clock)
         .await
-        .unwrap_err();
-
-    let msg = format!("{err:#}");
-    assert!(msg.contains("failed to update cursor for acme/api"));
-    assert!(msg.contains("cursor write failed for acme/api"));
+        .unwrap();
+    assert_eq!(out.repo_errors.len(), 1);
+    assert!(out.repo_errors[0].contains("cursor write failed for acme/api"));
+    assert_eq!(out.failures.len(), 1);
+    assert_eq!(out.failures[0].kind, FAILURE_KIND_REPO_POLL);
+    assert_eq!(out.failures[0].repo, "acme/api");
 }
 
 #[tokio::test]

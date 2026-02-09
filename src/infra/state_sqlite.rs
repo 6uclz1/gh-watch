@@ -1,13 +1,40 @@
 use std::{collections::HashSet, fs, path::Path, sync::Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 
 use crate::{
     domain::{events::WatchEvent, failure::FailureRecord},
-    ports::StateStorePort,
+    ports::{PendingNotification, PersistBatchResult, RepoPersistBatch, StateStorePort},
 };
+
+const SCHEMA_VERSION: &str = "2";
+
+#[derive(Debug)]
+pub struct StateSchemaMismatchError {
+    path: String,
+}
+
+impl StateSchemaMismatchError {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.display().to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for StateSchemaMismatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "state db schema is incompatible: {} (run `gh-watch init --reset-state`)",
+            self.path
+        )
+    }
+}
+
+impl std::error::Error for StateSchemaMismatchError {}
 
 pub struct SqliteStateStore {
     conn: Mutex<Connection>,
@@ -23,39 +50,126 @@ impl SqliteStateStore {
 
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open sqlite db: {}", path.display()))?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
-        let store = Self {
+        Self::ensure_schema(path, &conn)?;
+        Ok(Self {
             conn: Mutex::new(conn),
-        };
-        store.init_schema()?;
-        Ok(store)
+        })
     }
 
-    fn init_schema(&self) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+    fn ensure_schema(path: &Path, conn: &Connection) -> Result<()> {
+        if !Self::has_non_internal_tables(conn)? {
+            Self::init_schema_v2(conn)?;
+            return Ok(());
+        }
+
+        if !Self::has_compatible_schema(conn)? {
+            return Err(StateSchemaMismatchError::new(path).into());
+        }
+
+        Ok(())
+    }
+
+    fn has_non_internal_tables(conn: &Connection) -> Result<bool> {
+        let has_any: i64 = conn.query_row(
+            "
+SELECT EXISTS(
+  SELECT 1
+  FROM sqlite_master
+  WHERE type = 'table'
+    AND name NOT LIKE 'sqlite_%'
+)
+",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(has_any == 1)
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+        let exists: i64 = conn.query_row(
+            "
+SELECT EXISTS(
+  SELECT 1
+  FROM sqlite_master
+  WHERE type = 'table' AND name = ?1
+)
+",
+            params![table],
+            |row| row.get(0),
+        )?;
+        Ok(exists == 1)
+    }
+
+    fn has_compatible_schema(conn: &Connection) -> Result<bool> {
+        if !Self::table_exists(conn, "schema_meta")? {
+            return Ok(false);
+        }
+
+        let version: Option<String> = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if version.as_deref() != Some(SCHEMA_VERSION) {
+            return Ok(false);
+        }
+
+        for table in [
+            "polling_cursors_v2",
+            "event_log_v2",
+            "notification_queue_v2",
+            "failure_events",
+        ] {
+            if !Self::table_exists(conn, table)? {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn init_schema_v2(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
-CREATE TABLE IF NOT EXISTS notified_events (
-  event_key TEXT PRIMARY KEY,
-  repo TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  notified_at TEXT NOT NULL,
-  event_created_at TEXT NOT NULL,
-  url TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS schema_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS polling_cursors (
+CREATE TABLE IF NOT EXISTS polling_cursors_v2 (
   repo TEXT PRIMARY KEY,
   last_polled_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS timeline_events (
+CREATE TABLE IF NOT EXISTS event_log_v2 (
   event_key TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  delivered_at TEXT,
   read_at TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_event_log_v2_created_at
+ON event_log_v2 (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS notification_queue_v2 (
+  event_key TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL,
+  last_error TEXT,
+  enqueued_at TEXT NOT NULL,
+  FOREIGN KEY(event_key) REFERENCES event_log_v2(event_key) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_queue_v2_next_attempt_at
+ON notification_queue_v2 (next_attempt_at ASC);
 
 CREATE TABLE IF NOT EXISTS failure_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,29 +183,21 @@ CREATE INDEX IF NOT EXISTS idx_failure_events_failed_at
 ON failure_events (failed_at DESC, id DESC);
 ",
         )?;
-        Self::ensure_timeline_read_column(&conn)?;
+
+        conn.execute(
+            "
+INSERT INTO schema_meta (key, value)
+VALUES ('schema_version', ?1)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value
+",
+            params![SCHEMA_VERSION],
+        )?;
+
         Ok(())
     }
 
-    fn ensure_timeline_read_column(conn: &Connection) -> Result<()> {
-        // Migrate old DBs that were created before `read_at` existed.
-        let mut stmt = conn.prepare("PRAGMA table_info(timeline_events)")?;
-        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        let has_read_at = columns
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .any(|name| name == "read_at");
-
-        if has_read_at {
-            return Ok(());
-        }
-
-        conn.execute("ALTER TABLE timeline_events ADD COLUMN read_at TEXT", [])?;
-        conn.execute(
-            "UPDATE timeline_events SET read_at = created_at WHERE read_at IS NULL",
-            [],
-        )?;
-        Ok(())
+    fn parse_watch_event_payload(payload: String) -> Result<WatchEvent> {
+        Ok(serde_json::from_str(&payload)?)
     }
 
     pub fn load_timeline_events_since(
@@ -103,7 +209,7 @@ ON failure_events (failed_at DESC, id DESC);
         let mut stmt = conn.prepare(
             "
 SELECT payload_json
-FROM timeline_events
+FROM event_log_v2
 WHERE created_at >= ?1
 ORDER BY created_at DESC
 LIMIT ?2
@@ -113,13 +219,9 @@ LIMIT ?2
         let rows = stmt.query_map(params![since.to_rfc3339(), limit as i64], |row| {
             row.get::<_, String>(0)
         })?;
-        let items = rows
-            .map(|row| -> Result<WatchEvent> {
-                let payload = row?;
-                Ok(serde_json::from_str(&payload)?)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(items)
+
+        rows.map(|row| Self::parse_watch_event_payload(row?))
+            .collect::<Result<Vec<_>>>()
     }
 
     pub fn load_failures_since(
@@ -147,14 +249,12 @@ LIMIT ?2
             ))
         })?;
 
-        let items = rows
-            .map(|row| -> Result<FailureRecord> {
-                let (kind, repo, failed_at, message) = row?;
-                let failed_at = DateTime::parse_from_rfc3339(&failed_at)?.with_timezone(&Utc);
-                Ok(FailureRecord::new(kind, repo, failed_at, message))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(items)
+        rows.map(|row| -> Result<FailureRecord> {
+            let (kind, repo, failed_at, message) = row?;
+            let failed_at = DateTime::parse_from_rfc3339(&failed_at)?.with_timezone(&Utc);
+            Ok(FailureRecord::new(kind, repo, failed_at, message))
+        })
+        .collect::<Result<Vec<_>>>()
     }
 }
 
@@ -163,7 +263,7 @@ impl StateStorePort for SqliteStateStore {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let value: Option<String> = conn
             .query_row(
-                "SELECT last_polled_at FROM polling_cursors WHERE repo = ?1",
+                "SELECT last_polled_at FROM polling_cursors_v2 WHERE repo = ?1",
                 params![repo],
                 |row| row.get(0),
             )
@@ -179,7 +279,7 @@ impl StateStorePort for SqliteStateStore {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         conn.execute(
             "
-INSERT INTO polling_cursors (repo, last_polled_at)
+INSERT INTO polling_cursors_v2 (repo, last_polled_at)
 VALUES (?1, ?2)
 ON CONFLICT(repo) DO UPDATE SET last_polled_at = excluded.last_polled_at
 ",
@@ -190,34 +290,47 @@ ON CONFLICT(repo) DO UPDATE SET last_polled_at = excluded.last_polled_at
 
     fn is_event_notified(&self, event_key: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let exists: Option<String> = conn
+        let delivered_at: Option<String> = conn
             .query_row(
-                "SELECT event_key FROM notified_events WHERE event_key = ?1",
+                "SELECT delivered_at FROM event_log_v2 WHERE event_key = ?1",
                 params![event_key],
                 |row| row.get(0),
             )
-            .optional()?;
-        Ok(exists.is_some())
+            .optional()?
+            .flatten();
+        Ok(delivered_at.is_some())
     }
 
     fn record_notified_event(&self, event: &WatchEvent, notified_at: DateTime<Utc>) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        conn.execute(
+        let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let tx = conn.transaction()?;
+        let payload = serde_json::to_string(event)?;
+        tx.execute(
             "
-INSERT OR REPLACE INTO notified_events
-(event_key, repo, kind, source_id, notified_at, event_created_at, url)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+INSERT INTO event_log_v2
+  (event_key, repo, payload_json, created_at, observed_at, delivered_at, read_at)
+VALUES
+  (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+ON CONFLICT(event_key) DO UPDATE SET
+  payload_json = excluded.payload_json,
+  created_at = excluded.created_at,
+  observed_at = excluded.observed_at,
+  delivered_at = excluded.delivered_at
 ",
             params![
                 event.event_key(),
                 event.repo,
-                event.kind.as_str(),
-                event.source_item_id,
-                notified_at.to_rfc3339(),
+                payload,
                 event.created_at.to_rfc3339(),
-                event.url,
+                notified_at.to_rfc3339(),
+                notified_at.to_rfc3339(),
             ],
         )?;
+        tx.execute(
+            "DELETE FROM notification_queue_v2 WHERE event_key = ?1",
+            params![event.event_key()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -267,13 +380,18 @@ LIMIT 1
         let payload = serde_json::to_string(event)?;
         conn.execute(
             "
-INSERT INTO timeline_events (event_key, payload_json, created_at, read_at)
-VALUES (?1, ?2, ?3, NULL)
-ON CONFLICT(event_key) DO UPDATE
-SET payload_json = excluded.payload_json,
-    created_at = excluded.created_at
+INSERT OR IGNORE INTO event_log_v2
+  (event_key, repo, payload_json, created_at, observed_at, delivered_at, read_at)
+VALUES
+  (?1, ?2, ?3, ?4, ?5, NULL, NULL)
 ",
-            params![event.event_key(), payload, event.created_at.to_rfc3339()],
+            params![
+                event.event_key(),
+                event.repo,
+                payload,
+                event.created_at.to_rfc3339(),
+                Utc::now().to_rfc3339(),
+            ],
         )?;
         Ok(())
     }
@@ -283,27 +401,22 @@ SET payload_json = excluded.payload_json,
         let mut stmt = conn.prepare(
             "
 SELECT payload_json
-FROM timeline_events
+FROM event_log_v2
 ORDER BY created_at DESC
 LIMIT ?1
 ",
         )?;
 
         let rows = stmt.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
-        let items = rows
-            .map(|row| -> Result<WatchEvent> {
-                let payload = row?;
-                Ok(serde_json::from_str(&payload)?)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(items)
+        rows.map(|row| Self::parse_watch_event_payload(row?))
+            .collect::<Result<Vec<_>>>()
     }
 
     fn mark_timeline_event_read(&self, event_key: &str, read_at: DateTime<Utc>) -> Result<()> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         conn.execute(
             "
-UPDATE timeline_events
+UPDATE event_log_v2
 SET read_at = COALESCE(read_at, ?2)
 WHERE event_key = ?1
 ",
@@ -320,13 +433,12 @@ WHERE event_key = ?1
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut read_keys = HashSet::new();
 
-        // Keep SQLite parameter count within the default variable limit.
         for keys in event_keys.chunks(900) {
             let placeholders = vec!["?"; keys.len()].join(", ");
             let sql = format!(
                 "
 SELECT event_key
-FROM timeline_events
+FROM event_log_v2
 WHERE read_at IS NOT NULL
   AND event_key IN ({placeholders})
 "
@@ -349,11 +461,7 @@ WHERE read_at IS NOT NULL
         let cutoff = now - Duration::days(retention_days as i64);
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         conn.execute(
-            "DELETE FROM notified_events WHERE event_created_at < ?1",
-            params![cutoff.to_rfc3339()],
-        )?;
-        conn.execute(
-            "DELETE FROM timeline_events WHERE created_at < ?1",
+            "DELETE FROM event_log_v2 WHERE created_at < ?1",
             params![cutoff.to_rfc3339()],
         )?;
         conn.execute(
@@ -373,5 +481,188 @@ WHERE id IN (
             params![failure_history_limit as i64],
         )?;
         Ok(())
+    }
+
+    fn persist_repo_batch(&self, batch: &RepoPersistBatch) -> Result<PersistBatchResult> {
+        let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute(
+            "
+INSERT INTO polling_cursors_v2 (repo, last_polled_at)
+VALUES (?1, ?2)
+ON CONFLICT(repo) DO UPDATE SET last_polled_at = excluded.last_polled_at
+",
+            params![batch.repo, batch.poll_started_at.to_rfc3339()],
+        )?;
+
+        let mut result = PersistBatchResult::default();
+        for event in &batch.events {
+            if event.repo != batch.repo {
+                return Err(anyhow!(
+                    "repo batch mismatch: batch repo={} event repo={}",
+                    batch.repo,
+                    event.repo
+                ));
+            }
+
+            let event_key = event.event_key();
+            let payload = serde_json::to_string(event)?;
+            let inserted = tx.execute(
+                "
+INSERT OR IGNORE INTO event_log_v2
+  (event_key, repo, payload_json, created_at, observed_at, delivered_at, read_at)
+VALUES
+  (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+",
+                params![
+                    event_key,
+                    event.repo,
+                    payload,
+                    event.created_at.to_rfc3339(),
+                    batch.poll_started_at.to_rfc3339(),
+                    if batch.queue_notifications {
+                        None::<String>
+                    } else {
+                        Some(batch.poll_started_at.to_rfc3339())
+                    },
+                ],
+            )?;
+
+            if inserted == 1 {
+                result.newly_logged_event_keys.push(event_key.clone());
+            }
+
+            if batch.queue_notifications {
+                let queued = tx.execute(
+                    "
+INSERT INTO notification_queue_v2
+  (event_key, repo, attempts, next_attempt_at, last_error, enqueued_at)
+SELECT event_key, repo, 0, ?2, NULL, ?2
+FROM event_log_v2
+WHERE event_key = ?1
+  AND delivered_at IS NULL
+ON CONFLICT(event_key) DO NOTHING
+",
+                    params![event_key, batch.poll_started_at.to_rfc3339()],
+                )?;
+                result.queued_notifications += queued;
+            } else {
+                tx.execute(
+                    "
+UPDATE event_log_v2
+SET delivered_at = COALESCE(delivered_at, ?2)
+WHERE event_key = ?1
+",
+                    params![event_key, batch.poll_started_at.to_rfc3339()],
+                )?;
+                tx.execute(
+                    "DELETE FROM notification_queue_v2 WHERE event_key = ?1",
+                    params![event_key],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn load_due_notifications(
+        &self,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<PendingNotification>> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut stmt = conn.prepare(
+            "
+SELECT q.event_key, e.payload_json, q.attempts, q.next_attempt_at
+FROM notification_queue_v2 q
+INNER JOIN event_log_v2 e
+  ON e.event_key = q.event_key
+WHERE q.next_attempt_at <= ?1
+ORDER BY q.next_attempt_at ASC
+LIMIT ?2
+",
+        )?;
+
+        let rows = stmt.query_map(params![now.to_rfc3339(), limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        rows.map(|row| -> Result<PendingNotification> {
+            let (event_key, payload, attempts, next_attempt_at) = row?;
+            let event = serde_json::from_str::<WatchEvent>(&payload)?;
+            let next_attempt_at =
+                DateTime::parse_from_rfc3339(&next_attempt_at)?.with_timezone(&Utc);
+            Ok(PendingNotification {
+                event_key,
+                event,
+                attempts: attempts.max(0) as u32,
+                next_attempt_at,
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+    }
+
+    fn mark_notification_delivered(
+        &self,
+        event_key: &str,
+        delivered_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute(
+            "
+UPDATE event_log_v2
+SET delivered_at = COALESCE(delivered_at, ?2)
+WHERE event_key = ?1
+",
+            params![event_key, delivered_at.to_rfc3339()],
+        )?;
+        tx.execute(
+            "DELETE FROM notification_queue_v2 WHERE event_key = ?1",
+            params![event_key],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn reschedule_notification(
+        &self,
+        event_key: &str,
+        attempts: u32,
+        next_attempt_at: DateTime<Utc>,
+        last_error: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        conn.execute(
+            "
+UPDATE notification_queue_v2
+SET attempts = ?2,
+    next_attempt_at = ?3,
+    last_error = ?4
+WHERE event_key = ?1
+",
+            params![
+                event_key,
+                attempts as i64,
+                next_attempt_at.to_rfc3339(),
+                last_error
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn pending_notification_count(&self) -> Result<usize> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM notification_queue_v2", [], |row| {
+                row.get(0)
+            })?;
+        Ok(count.max(0) as usize)
     }
 }

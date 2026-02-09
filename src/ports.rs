@@ -13,6 +13,28 @@ pub trait GhClientPort: Send + Sync {
     async fn fetch_repo_events(&self, repo: &str, since: DateTime<Utc>) -> Result<Vec<WatchEvent>>;
 }
 
+#[derive(Debug, Clone)]
+pub struct RepoPersistBatch {
+    pub repo: String,
+    pub poll_started_at: DateTime<Utc>,
+    pub events: Vec<WatchEvent>,
+    pub queue_notifications: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PersistBatchResult {
+    pub newly_logged_event_keys: Vec<String>,
+    pub queued_notifications: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingNotification {
+    pub event_key: String,
+    pub event: WatchEvent,
+    pub attempts: u32,
+    pub next_attempt_at: DateTime<Utc>,
+}
+
 pub trait StateStorePort: Send + Sync {
     fn get_cursor(&self, repo: &str) -> Result<Option<DateTime<Utc>>>;
     fn set_cursor(&self, repo: &str, at: DateTime<Utc>) -> Result<()>;
@@ -30,6 +52,25 @@ pub trait StateStorePort: Send + Sync {
         failure_history_limit: usize,
         now: DateTime<Utc>,
     ) -> Result<()>;
+    fn persist_repo_batch(&self, batch: &RepoPersistBatch) -> Result<PersistBatchResult>;
+    fn load_due_notifications(
+        &self,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<PendingNotification>>;
+    fn mark_notification_delivered(
+        &self,
+        event_key: &str,
+        delivered_at: DateTime<Utc>,
+    ) -> Result<()>;
+    fn reschedule_notification(
+        &self,
+        event_key: &str,
+        attempts: u32,
+        next_attempt_at: DateTime<Utc>,
+        last_error: &str,
+    ) -> Result<()>;
+    fn pending_notification_count(&self) -> Result<usize>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

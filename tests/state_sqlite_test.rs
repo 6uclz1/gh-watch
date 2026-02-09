@@ -1,8 +1,8 @@
 use chrono::{Duration, TimeZone, Utc};
 use gh_watch::domain::events::{EventKind, WatchEvent};
 use gh_watch::domain::failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL};
-use gh_watch::infra::state_sqlite::SqliteStateStore;
-use gh_watch::ports::StateStorePort;
+use gh_watch::infra::state_sqlite::{SqliteStateStore, StateSchemaMismatchError};
+use gh_watch::ports::{RepoPersistBatch, StateStorePort};
 use rusqlite::params;
 use tempfile::tempdir;
 
@@ -128,7 +128,7 @@ fn failure_history_limit_keeps_recent_records_only() {
 }
 
 #[test]
-fn opening_legacy_timeline_schema_marks_existing_events_as_read() {
+fn opening_legacy_timeline_schema_returns_schema_mismatch_error() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("state.db");
     let legacy_event = sample_event(
@@ -161,22 +161,11 @@ VALUES (?1, ?2, ?3)
     .unwrap();
     drop(conn);
 
-    let store = SqliteStateStore::new(&db).unwrap();
-    let key = legacy_event.event_key();
-    let read_keys = store
-        .load_read_event_keys(std::slice::from_ref(&key))
-        .unwrap();
-    assert!(read_keys.contains(&key));
-
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    let read_at: Option<String> = conn
-        .query_row(
-            "SELECT read_at FROM timeline_events WHERE event_key = ?1",
-            params![key],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(read_at, Some(legacy_event.created_at.to_rfc3339()));
+    let err = match SqliteStateStore::new(&db) {
+        Ok(_) => panic!("legacy schema should be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.downcast_ref::<StateSchemaMismatchError>().is_some());
 }
 
 #[test]
@@ -234,10 +223,80 @@ fn upserting_same_event_key_preserves_read_state() {
     let conn = rusqlite::Connection::open(&db).unwrap();
     let persisted_read_at: Option<String> = conn
         .query_row(
-            "SELECT read_at FROM timeline_events WHERE event_key = ?1",
+            "SELECT read_at FROM event_log_v2 WHERE event_key = ?1",
             params![key],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(persisted_read_at, Some(read_at.to_rfc3339()));
+}
+
+#[test]
+fn persist_batch_notification_queue_roundtrip_with_reschedule_and_delivery() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let store = SqliteStateStore::new(&db).unwrap();
+    let poll_started_at = Utc.with_ymd_and_hms(2025, 1, 10, 0, 0, 0).unwrap();
+    let event = sample_event(
+        "queue-1",
+        Utc.with_ymd_and_hms(2025, 1, 9, 23, 59, 0).unwrap(),
+    );
+
+    let batch = RepoPersistBatch {
+        repo: "acme/api".to_string(),
+        poll_started_at,
+        events: vec![event.clone()],
+        queue_notifications: true,
+    };
+    let persisted = store.persist_repo_batch(&batch).unwrap();
+    assert_eq!(persisted.newly_logged_event_keys, vec![event.event_key()]);
+    assert_eq!(persisted.queued_notifications, 1);
+    assert_eq!(store.pending_notification_count().unwrap(), 1);
+
+    let due = store.load_due_notifications(poll_started_at, 10).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].event_key, event.event_key());
+    assert_eq!(due[0].attempts, 0);
+
+    let next_attempt = poll_started_at + Duration::seconds(30);
+    store
+        .reschedule_notification(&event.event_key(), 1, next_attempt, "temporary")
+        .unwrap();
+    assert!(store
+        .load_due_notifications(poll_started_at + Duration::seconds(29), 10)
+        .unwrap()
+        .is_empty());
+
+    let due_again = store.load_due_notifications(next_attempt, 10).unwrap();
+    assert_eq!(due_again.len(), 1);
+    assert_eq!(due_again[0].attempts, 1);
+
+    store
+        .mark_notification_delivered(&event.event_key(), next_attempt)
+        .unwrap();
+    assert_eq!(store.pending_notification_count().unwrap(), 0);
+    assert!(store.is_event_notified(&event.event_key()).unwrap());
+}
+
+#[test]
+fn persist_batch_without_queue_marks_events_delivered_immediately() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let store = SqliteStateStore::new(&db).unwrap();
+    let poll_started_at = Utc.with_ymd_and_hms(2025, 1, 11, 0, 0, 0).unwrap();
+    let event = sample_event(
+        "bootstrap-1",
+        Utc.with_ymd_and_hms(2025, 1, 10, 23, 0, 0).unwrap(),
+    );
+
+    let batch = RepoPersistBatch {
+        repo: "acme/api".to_string(),
+        poll_started_at,
+        events: vec![event.clone()],
+        queue_notifications: false,
+    };
+    let persisted = store.persist_repo_batch(&batch).unwrap();
+    assert_eq!(persisted.newly_logged_event_keys, vec![event.event_key()]);
+    assert_eq!(store.pending_notification_count().unwrap(), 0);
+    assert!(store.is_event_notified(&event.event_key()).unwrap());
 }

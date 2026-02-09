@@ -399,7 +399,8 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     }
 
     let selected_inner_width = shrink_by_border(layout.selected).width as usize;
-    let [selected_summary, selected_url] = build_selected_lines(model, glyph_mode, selected_inner_width);
+    let [selected_summary, selected_url] =
+        build_selected_lines(model, glyph_mode, selected_inner_width);
     let selected = Paragraph::new(vec![Line::from(selected_summary), Line::from(selected_url)])
         .block(Block::default().borders(Borders::ALL).title("Sel"));
     frame.render_widget(selected, layout.selected);

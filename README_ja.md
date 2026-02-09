@@ -124,7 +124,7 @@ gh-watch watch
 - `r`: 手動更新
 - `Tab` / `Shift+Tab`: `Timeline` / `Repositories` タブ切替
 - `?`: ヘルプ表示切替
-- `Enter`: 選択URLを開く
+- `Enter`: 選択URLを開く（WSLでは `powershell.exe` 経由でWindows既定ブラウザを開く）
 - `↑` / `↓` or `j` / `k`: 1件移動（Timelineタブ）
 - `PageUp` / `PageDown`: 1ページ移動（Timelineタブ）
 - `g` / `Home`: 先頭（Timelineタブ）

@@ -371,16 +371,7 @@ fn open_url_in_browser(url: &str) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        let ok = Command::new("xdg-open")
-            .arg(url)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if ok {
-            return Ok(());
-        }
-
-        return Err(anyhow!("failed to open URL with xdg-open: {url}"));
+        return open_url_on_linux(url, detect_wsl(), run_linux_open_backend);
     }
 
     #[cfg(target_os = "windows")]
@@ -400,6 +391,99 @@ fn open_url_in_browser(url: &str) -> Result<()> {
 
     #[allow(unreachable_code)]
     Err(anyhow!("unsupported OS for opening URLs"))
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinuxOpenBackend {
+    WslPowerShell,
+    XdgOpen,
+}
+
+#[cfg(target_os = "linux")]
+fn open_url_on_linux<F>(url: &str, is_wsl: bool, mut runner: F) -> Result<()>
+where
+    F: FnMut(LinuxOpenBackend, &str) -> bool,
+{
+    let backend = if is_wsl {
+        LinuxOpenBackend::WslPowerShell
+    } else {
+        LinuxOpenBackend::XdgOpen
+    };
+
+    if runner(backend, url) {
+        return Ok(());
+    }
+
+    match backend {
+        LinuxOpenBackend::WslPowerShell => Err(anyhow!(
+            "failed to open URL with powershell.exe in WSL: {url}"
+        )),
+        LinuxOpenBackend::XdgOpen => Err(anyhow!("failed to open URL with xdg-open: {url}")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_open_backend(backend: LinuxOpenBackend, url: &str) -> bool {
+    match backend {
+        LinuxOpenBackend::WslPowerShell => Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Process $env:GH_WATCH_OPEN_URL | Out-Null",
+            ])
+            .env("GH_WATCH_OPEN_URL", url)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false),
+        LinuxOpenBackend::XdgOpen => Command::new("xdg-open")
+            .arg(url)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_wsl() -> bool {
+    let distro_name = std::env::var("WSL_DISTRO_NAME").ok();
+    let interop = std::env::var("WSL_INTEROP").ok();
+    let proc_hint = read_proc_wsl_hint();
+    is_wsl_from_inputs(
+        distro_name.as_deref(),
+        interop.as_deref(),
+        proc_hint.as_deref(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn is_wsl_from_inputs(
+    wsl_distro_name: Option<&str>,
+    wsl_interop: Option<&str>,
+    proc_hint: Option<&str>,
+) -> bool {
+    if wsl_distro_name.is_some_and(|value| !value.trim().is_empty()) {
+        return true;
+    }
+    if wsl_interop.is_some_and(|value| !value.trim().is_empty()) {
+        return true;
+    }
+    proc_hint
+        .map(|value| value.to_ascii_lowercase().contains("microsoft"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn read_proc_wsl_hint() -> Option<String> {
+    let version = std::fs::read_to_string("/proc/version").ok();
+    let osrelease = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+    match (version, osrelease) {
+        (Some(version), Some(osrelease)) => Some(format!("{version}\n{osrelease}")),
+        (Some(version), None) => Some(version),
+        (None, Some(osrelease)) => Some(osrelease),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]
@@ -876,5 +960,80 @@ mod tests {
 
         assert!(state.start_poll());
         assert!(state.in_flight());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_open_uses_powershell_only_when_wsl() {
+        let url = "https://example.com/wsl";
+        let mut calls = Vec::new();
+
+        let result = super::open_url_on_linux(url, true, |backend, _url| {
+            calls.push(backend);
+            true
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(calls, vec![super::LinuxOpenBackend::WslPowerShell]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_open_wsl_failure_does_not_fallback_to_xdg_open() {
+        let url = "https://example.com/wsl-fail";
+        let mut calls = Vec::new();
+
+        let err = super::open_url_on_linux(url, true, |backend, _url| {
+            calls.push(backend);
+            false
+        })
+        .expect_err("wsl powershell failure should bubble up");
+
+        assert_eq!(calls, vec![super::LinuxOpenBackend::WslPowerShell]);
+        assert_eq!(
+            err.to_string(),
+            format!("failed to open URL with powershell.exe in WSL: {url}")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_open_uses_xdg_open_when_not_wsl() {
+        let url = "https://example.com/linux";
+        let mut calls = Vec::new();
+
+        let result = super::open_url_on_linux(url, false, |backend, _url| {
+            calls.push(backend);
+            true
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(calls, vec![super::LinuxOpenBackend::XdgOpen]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wsl_detection_inputs_follow_expected_precedence() {
+        assert!(super::is_wsl_from_inputs(
+            Some("Ubuntu"),
+            None,
+            Some("Linux version 6.6.87.2-generic")
+        ));
+        assert!(super::is_wsl_from_inputs(
+            None,
+            Some("/run/WSL/123_interop"),
+            Some("Linux version 6.6.87.2-generic")
+        ));
+        assert!(super::is_wsl_from_inputs(
+            None,
+            None,
+            Some("Linux version 6.6.87.2-microsoft-standard-WSL2")
+        ));
+        assert!(!super::is_wsl_from_inputs(
+            None,
+            None,
+            Some("Linux version 6.6.87.2-generic")
+        ));
+        assert!(!super::is_wsl_from_inputs(None, None, None));
     }
 }

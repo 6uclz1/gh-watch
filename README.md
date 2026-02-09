@@ -126,7 +126,7 @@ Global filter keys:
 - `r`: refresh now
 - `Tab` / `Shift+Tab`: switch `Timeline` and `Repositories` tabs
 - `?`: toggle help
-- `Enter`: open selected URL
+- `Enter`: open selected URL (on WSL, opens the Windows default browser via `powershell.exe`)
 - `↑` / `↓` or `j` / `k`: move one item (Timeline tab)
 - `PageUp` / `PageDown`: move one page (Timeline tab)
 - `g` / `Home`: top (Timeline tab)

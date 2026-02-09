@@ -64,7 +64,7 @@ fn dispatch_result(include_url: bool, click_action: bool) -> NotificationDispatc
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum DesktopBackendKind {
     MacOs,
     WslPowerShell,
@@ -399,14 +399,14 @@ fn escape_apple_script_literal(raw: &str) -> String {
 mod tests {
     use chrono::{TimeZone, Utc};
 
+    #[cfg(target_os = "macos")]
+    use super::DesktopNotifier;
     use super::{
         build_notification_body, is_wsl_from_inputs, select_linux_backend, DesktopBackendKind,
-        DesktopNotifier,
     };
-    use crate::{
-        config::NotificationConfig,
-        domain::events::{EventKind, WatchEvent},
-    };
+    #[cfg(target_os = "macos")]
+    use crate::config::NotificationConfig;
+    use crate::domain::events::{EventKind, WatchEvent};
 
     fn sample_event() -> WatchEvent {
         WatchEvent {

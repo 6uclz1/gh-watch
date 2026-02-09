@@ -685,14 +685,8 @@ fn build_selected_lines(model: &TuiModel, glyph_mode: GlyphMode, max_width: usiz
     ]
 }
 
-fn build_keys_line(glyph_mode: GlyphMode) -> String {
-    match glyph_mode {
-        GlyphMode::Nerd => "󰩈 q  󰅖 Esc Esc  󰑐 r  󰌍 Tab  󰋖 ?  󰌑 Enter  󰘶 jk/↑↓ Pg↑↓ g/G".to_string(),
-        GlyphMode::Ascii => {
-            "q quit | Esc Esc | r refresh | Tab switch | ? help | Enter open | jk/UD PgUpDn g/G"
-                .to_string()
-        }
-    }
+fn build_keys_line(_glyph_mode: GlyphMode) -> String {
+    "q quit | Esc Esc quit | r refresh | Tab switch | ? help | Enter open".to_string()
 }
 
 fn format_compact_status_time(dt: Option<DateTime<Utc>>) -> String {
@@ -929,8 +923,27 @@ mod tests {
         let line = build_keys_line(GlyphMode::Ascii);
         assert_eq!(
             line,
-            "q quit | Esc Esc | r refresh | Tab switch | ? help | Enter open | jk/UD PgUpDn g/G"
+            "q quit | Esc Esc quit | r refresh | Tab switch | ? help | Enter open"
         );
+    }
+
+    #[test]
+    fn keys_line_uses_same_text_for_nerd_mode() {
+        let ascii = build_keys_line(GlyphMode::Ascii);
+        let nerd = build_keys_line(GlyphMode::Nerd);
+        assert_eq!(nerd, ascii);
+    }
+
+    #[test]
+    fn keys_line_omits_navigation_hints() {
+        let ascii = build_keys_line(GlyphMode::Ascii);
+        let nerd = build_keys_line(GlyphMode::Nerd);
+        for line in [&ascii, &nerd] {
+            assert!(!line.contains("jk/"));
+            assert!(!line.contains("PgUpDn"));
+            assert!(!line.contains("Pg↑↓"));
+            assert!(!line.contains("g/G"));
+        }
     }
 
     #[test]

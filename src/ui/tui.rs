@@ -399,8 +399,8 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     }
 
     let selected_inner_width = shrink_by_border(layout.selected).width as usize;
-    let selected_text = build_selected_line(model, glyph_mode, selected_inner_width);
-    let selected = Paragraph::new(Line::from(selected_text))
+    let [selected_summary, selected_url] = build_selected_lines(model, glyph_mode, selected_inner_width);
+    let selected = Paragraph::new(vec![Line::from(selected_summary), Line::from(selected_url)])
         .block(Block::default().borders(Borders::ALL).title("Sel"));
     frame.render_widget(selected, layout.selected);
 
@@ -472,7 +472,7 @@ fn ui_layout(area: Rect) -> UiLayout {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Length(3),
         ])
         .split(area);
@@ -647,34 +647,41 @@ fn build_status_line(model: &TuiModel, now: DateTime<Utc>, glyph_mode: GlyphMode
     }
 }
 
-fn build_selected_line(model: &TuiModel, glyph_mode: GlyphMode, max_width: usize) -> String {
-    let raw = if let Some(event) = model.timeline.get(model.selected) {
+fn build_selected_lines(model: &TuiModel, glyph_mode: GlyphMode, max_width: usize) -> [String; 2] {
+    let (summary_raw, url_raw) = if let Some(event) = model.timeline.get(model.selected) {
         match glyph_mode {
-            GlyphMode::Nerd => format!(
-                "󰀷 {} 󰳝 {} 󰀄 @{} 󰎚 {} 󰌹 {}",
-                event_kind_label(&event.kind),
-                event.repo,
-                event.actor,
-                event.title,
-                event.url
+            GlyphMode::Nerd => (
+                format!(
+                    "󰀷 {} 󰳝 {} 󰀄 @{} 󰎚 {}",
+                    event_kind_label(&event.kind),
+                    event.repo,
+                    event.actor,
+                    event.title
+                ),
+                format!("󰌹 {}", event.url),
             ),
-            GlyphMode::Ascii => format!(
-                "{} | {} | @{} | {} | {}",
-                event_kind_label(&event.kind),
-                event.repo,
-                event.actor,
-                event.title,
-                event.url
+            GlyphMode::Ascii => (
+                format!(
+                    "{} | {} | @{} | {}",
+                    event_kind_label(&event.kind),
+                    event.repo,
+                    event.actor,
+                    event.title
+                ),
+                event.url.clone(),
             ),
         }
     } else {
         match glyph_mode {
-            GlyphMode::Nerd => "󰘕 no selection".to_string(),
-            GlyphMode::Ascii => "no selection".to_string(),
+            GlyphMode::Nerd => ("󰘕 no selection".to_string(), "-".to_string()),
+            GlyphMode::Ascii => ("no selection".to_string(), "-".to_string()),
         }
     };
 
-    truncate_tail(&raw, max_width)
+    [
+        truncate_tail(&summary_raw, max_width),
+        truncate_tail(&url_raw, max_width),
+    ]
 }
 
 fn build_keys_line(glyph_mode: GlyphMode) -> String {
@@ -836,7 +843,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        build_keys_line, build_selected_line, build_status_line, detect_glyph_mode,
+        build_keys_line, build_selected_lines, build_status_line, detect_glyph_mode,
         timeline_column_count, truncate_tail, ui_layout, unread_marker, GlyphMode, TuiModel,
     };
     use crate::domain::events::{EventKind, WatchEvent};
@@ -926,27 +933,27 @@ mod tests {
     }
 
     #[test]
-    fn selected_line_compacts_event_detail_into_single_line() {
+    fn selected_lines_compact_event_detail_and_url_into_two_lines() {
         let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
         let mut model = TuiModel::new(10);
         model.replace_timeline(vec![event("a", now)]);
-        let line = build_selected_line(&model, GlyphMode::Ascii, 200);
-        assert_eq!(
-            line,
-            "I-CMT | acme/api | @dev | comment | https://example.com/a"
-        );
+        let [line1, line2] = build_selected_lines(&model, GlyphMode::Ascii, 200);
+        assert_eq!(line1, "I-CMT | acme/api | @dev | comment");
+        assert_eq!(line2, "https://example.com/a");
     }
 
     #[test]
-    fn selected_line_truncates_to_available_width() {
+    fn selected_lines_truncate_to_available_width() {
         let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
         let mut model = TuiModel::new(10);
         let mut long_event = event("a", now);
         long_event.title = "a very very very long title that must be clipped".to_string();
         model.replace_timeline(vec![long_event]);
-        let line = build_selected_line(&model, GlyphMode::Ascii, 40);
-        assert!(line.chars().count() <= 40);
-        assert!(line.ends_with("..."));
+        let [line1, line2] = build_selected_lines(&model, GlyphMode::Ascii, 40);
+        assert!(line1.chars().count() <= 40);
+        assert!(line1.ends_with("..."));
+        assert!(line2.chars().count() <= 40);
+        assert!(!line2.is_empty());
     }
 
     #[test]
@@ -954,7 +961,7 @@ mod tests {
         let layout = ui_layout(Rect::new(0, 0, 120, 40));
         assert_eq!(layout.status.height, 3);
         assert_eq!(layout.tabs.height, 3);
-        assert_eq!(layout.selected.height, 3);
+        assert_eq!(layout.selected.height, 4);
         assert_eq!(layout.keys.height, 3);
     }
 

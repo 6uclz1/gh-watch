@@ -78,13 +78,6 @@ impl ActiveTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TimelineColumnMode {
-    Full,
-    Compact,
-    TitleOnly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GlyphMode {
     Nerd,
     Ascii,
@@ -380,14 +373,10 @@ struct UiLayout {
 
 fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     let layout = ui_layout(frame.area());
-    let [status_primary, status_timing, status_failures] =
-        build_status_lines(model, Utc::now(), detect_glyph_mode_from_env());
-    let header = Paragraph::new(vec![
-        Line::from(status_primary),
-        Line::from(status_timing),
-        Line::from(status_failures),
-    ])
-    .block(Block::default().borders(Borders::ALL).title("Status"));
+    let glyph_mode = detect_glyph_mode_from_env();
+    let status = build_status_line(model, Utc::now(), glyph_mode);
+    let header = Paragraph::new(Line::from(status))
+        .block(Block::default().borders(Borders::ALL).title("Stat"));
     frame.render_widget(header, layout.status);
 
     let tab_titles = ["Timeline", "Repositories"]
@@ -409,48 +398,14 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
         ActiveTab::Repositories => render_repositories_panel(frame, model, layout.content),
     }
 
-    let selected_text = model
-        .timeline
-        .get(model.selected)
-        .map(|ev| {
-            vec![
-                Line::from(vec![
-                    Span::styled(event_kind_label(&ev.kind), event_kind_style(&ev.kind)),
-                    Span::raw(format!(" {}", truncate_tail(&ev.title, 72))),
-                ]),
-                Line::from(format!(
-                    "repo={} | actor=@{} | at={}",
-                    ev.repo,
-                    ev.actor,
-                    format_status_time(Some(ev.created_at))
-                )),
-                Line::from(ev.url.clone()),
-            ]
-        })
-        .unwrap_or_else(|| {
-            vec![
-                Line::from("No selected event"),
-                Line::from("-"),
-                Line::from("-"),
-            ]
-        });
-    let selected = Paragraph::new(selected_text)
-        .block(Block::default().borders(Borders::ALL).title("Selected"));
+    let selected_inner_width = shrink_by_border(layout.selected).width as usize;
+    let selected_text = build_selected_line(model, glyph_mode, selected_inner_width);
+    let selected = Paragraph::new(Line::from(selected_text))
+        .block(Block::default().borders(Borders::ALL).title("Sel"));
     frame.render_widget(selected, layout.selected);
 
-    let loading_hint = if model.is_polling {
-        "loading: move/help/open available, r queues next refresh"
-    } else {
-        "loading: idle"
-    };
-    let keys = Paragraph::new(vec![
-        Line::from(
-            "q quit | Esc x2 quit (1.5s) | r refresh | Tab/Shift+Tab switch | ? help | Enter open",
-        ),
-        Line::from("arrows/jk page/home/end move timeline (Timeline tab only)"),
-        Line::from(loading_hint),
-    ])
-    .block(Block::default().borders(Borders::ALL).title("Keys"));
+    let keys = Paragraph::new(Line::from(build_keys_line(glyph_mode)))
+        .block(Block::default().borders(Borders::ALL).title("Keys"));
     frame.render_widget(keys, layout.keys);
 
     if model.help_visible {
@@ -462,19 +417,18 @@ fn render_timeline_panel(frame: &mut Frame<'_>, model: &mut TuiModel, area: Rect
     let timeline_inner = shrink_by_border(area);
     model.timeline_page_size = (timeline_inner.height as usize).saturating_sub(1).max(1);
 
-    let mode = timeline_column_mode(area.width);
     let rows = if model.timeline.is_empty() {
-        vec![timeline_empty_row(mode)]
+        vec![timeline_empty_row()]
     } else {
         model
             .timeline
             .iter()
-            .map(|event| timeline_row(event, model.is_event_read(&event.event_key()), mode))
+            .map(|event| timeline_row(event, model.is_event_read(&event.event_key())))
             .collect()
     };
 
-    let table = Table::new(rows, timeline_constraints(mode))
-        .header(timeline_header(mode).style(Style::default().add_modifier(Modifier::BOLD)))
+    let table = Table::new(rows, timeline_constraints())
+        .header(timeline_header().style(Style::default().add_modifier(Modifier::BOLD)))
         .block(Block::default().borders(Borders::ALL).title("Timeline"))
         .row_highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol(">> ");
@@ -516,10 +470,10 @@ fn ui_layout(area: Rect) -> UiLayout {
     let vertical_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(5),
-            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Length(3),
         ])
         .split(area);
 
@@ -537,81 +491,31 @@ fn ui_layout(area: Rect) -> UiLayout {
     }
 }
 
-fn timeline_column_mode(width: u16) -> TimelineColumnMode {
-    if width >= 115 {
-        TimelineColumnMode::Full
-    } else if width >= 100 {
-        TimelineColumnMode::Compact
-    } else {
-        TimelineColumnMode::TitleOnly
-    }
+#[cfg(test)]
+fn timeline_column_count() -> usize {
+    4
 }
 
-fn timeline_constraints(mode: TimelineColumnMode) -> Vec<Constraint> {
-    match mode {
-        TimelineColumnMode::Full => vec![
-            Constraint::Length(1),
-            Constraint::Length(14),
-            Constraint::Length(8),
-            Constraint::Length(22),
-            Constraint::Length(16),
-            Constraint::Min(12),
-        ],
-        TimelineColumnMode::Compact => vec![
-            Constraint::Length(1),
-            Constraint::Length(14),
-            Constraint::Length(8),
-            Constraint::Length(22),
-            Constraint::Min(12),
-        ],
-        TimelineColumnMode::TitleOnly => vec![
-            Constraint::Length(1),
-            Constraint::Length(14),
-            Constraint::Length(8),
-            Constraint::Min(12),
-        ],
-    }
+fn timeline_constraints() -> Vec<Constraint> {
+    vec![
+        Constraint::Length(1),
+        Constraint::Length(14),
+        Constraint::Length(8),
+        Constraint::Min(12),
+    ]
 }
 
-fn timeline_header(mode: TimelineColumnMode) -> Row<'static> {
-    match mode {
-        TimelineColumnMode::Full => {
-            Row::new(vec!["N", "Time(UTC)", "Type", "Repo", "Actor", "Title"])
-        }
-        TimelineColumnMode::Compact => Row::new(vec!["N", "Time(UTC)", "Type", "Repo", "Title"]),
-        TimelineColumnMode::TitleOnly => Row::new(vec!["N", "Time(UTC)", "Type", "Title"]),
-    }
+fn timeline_header() -> Row<'static> {
+    Row::new(vec!["N", "Time", "Type", "Title"])
 }
 
-fn timeline_empty_row(mode: TimelineColumnMode) -> Row<'static> {
-    match mode {
-        TimelineColumnMode::Full => Row::new(vec![
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("No events yet"),
-        ]),
-        TimelineColumnMode::Compact => Row::new(vec![
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("No events yet"),
-        ]),
-        TimelineColumnMode::TitleOnly => Row::new(vec![
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("-"),
-            Cell::from("No events yet"),
-        ]),
-    }
-}
-
-fn format_status_time(dt: Option<DateTime<Utc>>) -> String {
-    dt.map(|d| d.format("%Y-%m-%d %H:%M:%SZ").to_string())
-        .unwrap_or_else(|| "-".to_string())
+fn timeline_empty_row() -> Row<'static> {
+    Row::new(vec![
+        Cell::from("-"),
+        Cell::from("-"),
+        Cell::from("-"),
+        Cell::from("No events yet"),
+    ])
 }
 
 fn format_timeline_time(dt: DateTime<Utc>) -> String {
@@ -650,42 +554,16 @@ fn unread_marker(is_read: bool) -> &'static str {
     }
 }
 
-fn timeline_row(event: &WatchEvent, is_read: bool, mode: TimelineColumnMode) -> Row<'static> {
-    match mode {
-        TimelineColumnMode::Full => Row::new(vec![
-            Cell::from(unread_marker(is_read)),
-            Cell::from(format_timeline_time(event.created_at)),
-            Cell::from(Span::styled(
-                event_kind_label(&event.kind),
-                event_kind_style(&event.kind),
-            )),
-            Cell::from(truncate_tail(&event.repo, 22)),
-            Cell::from(truncate_tail(&format!("@{}", event.actor), 16)),
-            Cell::from(truncate_tail(&event.title, 96)),
-        ]),
-        TimelineColumnMode::Compact => Row::new(vec![
-            Cell::from(unread_marker(is_read)),
-            Cell::from(format_timeline_time(event.created_at)),
-            Cell::from(Span::styled(
-                event_kind_label(&event.kind),
-                event_kind_style(&event.kind),
-            )),
-            Cell::from(truncate_tail(&event.repo, 22)),
-            Cell::from(truncate_tail(&event.title, 96)),
-        ]),
-        TimelineColumnMode::TitleOnly => Row::new(vec![
-            Cell::from(unread_marker(is_read)),
-            Cell::from(format_timeline_time(event.created_at)),
-            Cell::from(Span::styled(
-                event_kind_label(&event.kind),
-                event_kind_style(&event.kind),
-            )),
-            Cell::from(truncate_tail(
-                &format!("{} | {}", event.repo, event.title),
-                120,
-            )),
-        ]),
-    }
+fn timeline_row(event: &WatchEvent, is_read: bool) -> Row<'static> {
+    Row::new(vec![
+        Cell::from(unread_marker(is_read)),
+        Cell::from(format_timeline_time(event.created_at)),
+        Cell::from(Span::styled(
+            event_kind_label(&event.kind),
+            event_kind_style(&event.kind),
+        )),
+        Cell::from(truncate_tail(&event.title, 120)),
+    ])
 }
 
 fn truncate_tail(raw: &str, max_chars: usize) -> String {
@@ -707,114 +585,111 @@ fn truncate_tail(raw: &str, max_chars: usize) -> String {
     clipped
 }
 
-fn build_status_lines(model: &TuiModel, now: DateTime<Utc>, glyph_mode: GlyphMode) -> [String; 3] {
-    [
-        build_primary_status_line(model, now, glyph_mode),
-        build_timing_status_line(model, now, glyph_mode),
-        build_failure_status_line(model, glyph_mode),
-    ]
-}
-
-fn build_primary_status_line(
-    model: &TuiModel,
-    now: DateTime<Utc>,
-    glyph_mode: GlyphMode,
-) -> String {
-    let status = simplified_status_text(model);
-
-    if model.is_polling {
-        let elapsed_ms = elapsed_poll_millis(model.poll_started_at, now);
-        let spinner = spinner_frame(elapsed_ms, glyph_mode);
-        return match glyph_mode {
-            GlyphMode::Nerd => format!("󰚩 {spinner} {status}"),
-            GlyphMode::Ascii => format!("~ {spinner} {status}"),
-        };
-    }
-
-    let prefix = match glyph_mode {
-        GlyphMode::Nerd => {
-            if is_error_status(&model.status_line) {
-                "󰅚"
-            } else if is_quit_armed_status(&model.status_line) {
-                "󰈆"
-            } else {
-                "󰄬"
-            }
-        }
-        GlyphMode::Ascii => {
-            if is_error_status(&model.status_line) {
-                "!"
-            } else if is_quit_armed_status(&model.status_line) {
-                ">"
-            } else {
-                "+"
-            }
-        }
-    };
-
-    format!("{prefix} {status}")
-}
-
-fn build_timing_status_line(model: &TuiModel, now: DateTime<Utc>, glyph_mode: GlyphMode) -> String {
-    let refresh = if model.queued_refresh {
-        "queued"
-    } else {
-        "none"
-    };
-
+fn build_status_line(model: &TuiModel, now: DateTime<Utc>, glyph_mode: GlyphMode) -> String {
     if model.is_polling {
         let elapsed_secs = model
             .poll_started_at
             .map(|started| (now - started).num_seconds().max(0))
             .unwrap_or(0);
-        return match glyph_mode {
-            GlyphMode::Nerd => format!("󱑂 {elapsed_secs}s 󰏖 {refresh}"),
-            GlyphMode::Ascii => format!("time {elapsed_secs}s | refresh {refresh}"),
+        let spinner = spinner_frame(elapsed_poll_millis(model.poll_started_at, now), glyph_mode);
+        let refresh = if model.queued_refresh {
+            "queued"
+        } else {
+            "none"
         };
-    }
-
-    let next_poll = format_status_time(model.next_poll_at);
-    match glyph_mode {
-        GlyphMode::Nerd => format!("󱑆 {next_poll} 󰏖 {refresh}"),
-        GlyphMode::Ascii => format!("next {next_poll} | refresh {refresh}"),
-    }
-}
-
-fn build_failure_status_line(model: &TuiModel, glyph_mode: GlyphMode) -> String {
-    if model.failure_count == 0 {
         return match glyph_mode {
-            GlyphMode::Nerd => "󰄬 failures 0".to_string(),
-            GlyphMode::Ascii => "failures 0".to_string(),
+            GlyphMode::Nerd => format!(
+                "󰚩 {spinner} poll 󱑂 {elapsed_secs}s 󰏗 {refresh} 󰅚 {}",
+                model.failure_count
+            ),
+            GlyphMode::Ascii => format!(
+                "~ {spinner} poll t={elapsed_secs}s refresh={refresh} fail={}",
+                model.failure_count
+            ),
         };
-    }
-
-    let latest = model
-        .latest_failure
-        .as_ref()
-        .map(summarize_failure)
-        .unwrap_or_else(|| "-".to_string());
-    let clipped_latest = truncate_tail(&latest, 84);
-
-    match glyph_mode {
-        GlyphMode::Nerd => format!("󰅚 failures {} | {clipped_latest}", model.failure_count),
-        GlyphMode::Ascii => format!("failures {} | {clipped_latest}", model.failure_count),
-    }
-}
-
-fn simplified_status_text(model: &TuiModel) -> String {
-    if model.is_polling {
-        return "polling".to_string();
-    }
-
-    if is_quit_armed_status(&model.status_line) {
-        return "quit armed".to_string();
     }
 
     if is_error_status(&model.status_line) {
-        return model.status_line.clone();
+        let detail = truncate_tail(&model.status_line, 48);
+        return match glyph_mode {
+            GlyphMode::Nerd => format!("󰅚 {detail} 󰅚 {}", model.failure_count),
+            GlyphMode::Ascii => format!("! {detail} fail={}", model.failure_count),
+        };
     }
 
-    "ready".to_string()
+    let status = if is_quit_armed_status(&model.status_line) {
+        "quit armed"
+    } else {
+        "ready"
+    };
+    let next_poll = format_compact_status_time(model.next_poll_at);
+
+    match glyph_mode {
+        GlyphMode::Nerd => {
+            let prefix = if is_quit_armed_status(&model.status_line) {
+                "󰈆"
+            } else {
+                "󰄬"
+            };
+            format!("{prefix} {status} 󱑆 {next_poll} 󰅚 {}", model.failure_count)
+        }
+        GlyphMode::Ascii => {
+            let prefix = if is_quit_armed_status(&model.status_line) {
+                ">"
+            } else {
+                "+"
+            };
+            format!(
+                "{prefix} {status} next={next_poll} fail={}",
+                model.failure_count
+            )
+        }
+    }
+}
+
+fn build_selected_line(model: &TuiModel, glyph_mode: GlyphMode, max_width: usize) -> String {
+    let raw = if let Some(event) = model.timeline.get(model.selected) {
+        match glyph_mode {
+            GlyphMode::Nerd => format!(
+                "󰀷 {} 󰳝 {} 󰀄 @{} 󰎚 {} 󰌹 {}",
+                event_kind_label(&event.kind),
+                event.repo,
+                event.actor,
+                event.title,
+                event.url
+            ),
+            GlyphMode::Ascii => format!(
+                "{} | {} | @{} | {} | {}",
+                event_kind_label(&event.kind),
+                event.repo,
+                event.actor,
+                event.title,
+                event.url
+            ),
+        }
+    } else {
+        match glyph_mode {
+            GlyphMode::Nerd => "󰘕 no selection".to_string(),
+            GlyphMode::Ascii => "no selection".to_string(),
+        }
+    };
+
+    truncate_tail(&raw, max_width)
+}
+
+fn build_keys_line(glyph_mode: GlyphMode) -> String {
+    match glyph_mode {
+        GlyphMode::Nerd => "󰩈 q  󰅖 Esc Esc  󰑐 r  󰌍 Tab  󰋖 ?  󰌑 Enter  󰘶 jk/↑↓ Pg↑↓ g/G".to_string(),
+        GlyphMode::Ascii => {
+            "q quit | Esc Esc | r refresh | Tab switch | ? help | Enter open | jk/UD PgUpDn g/G"
+                .to_string()
+        }
+    }
+}
+
+fn format_compact_status_time(dt: Option<DateTime<Utc>>) -> String {
+    dt.map(|d| d.format("%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn is_quit_armed_status(status: &str) -> bool {
@@ -884,21 +759,6 @@ fn detect_glyph_mode(
     }
 
     GlyphMode::Nerd
-}
-
-fn summarize_failure(failure: &FailureRecord) -> String {
-    let msg = failure.message.replace('\n', " ");
-    let mut clipped = msg.chars().take(96).collect::<String>();
-    if msg.chars().count() > 96 {
-        clipped.push_str("...");
-    }
-    format!(
-        "{} [{}:{}] {}",
-        format_status_time(Some(failure.failed_at)),
-        failure.kind,
-        failure.repo,
-        clipped
-    )
 }
 
 fn timeline_inner_area(area: Rect) -> Rect {
@@ -973,10 +833,11 @@ mod tests {
     use std::collections::HashSet;
 
     use chrono::TimeZone;
+    use ratatui::layout::Rect;
 
     use super::{
-        build_status_lines, detect_glyph_mode, timeline_column_mode, truncate_tail, unread_marker,
-        GlyphMode, TimelineColumnMode, TuiModel,
+        build_keys_line, build_selected_line, build_status_line, detect_glyph_mode,
+        timeline_column_count, truncate_tail, ui_layout, unread_marker, GlyphMode, TuiModel,
     };
     use crate::domain::events::{EventKind, WatchEvent};
 
@@ -1004,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_status_lines_use_nerd_spinner_and_show_queued_while_polling() {
+    fn loading_status_line_uses_nerd_spinner_and_shows_queued_while_polling() {
         let started_at = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
         let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap()
             + chrono::Duration::milliseconds(360);
@@ -1014,14 +875,12 @@ mod tests {
         model.poll_started_at = Some(started_at);
         model.queued_refresh = true;
 
-        let [line1, line2, line3] = build_status_lines(&model, now, GlyphMode::Nerd);
-        assert_eq!(line1, "󰚩 ⠸ polling");
-        assert_eq!(line2, "󱑂 0s 󰏖 queued");
-        assert_eq!(line3, "󰄬 failures 0");
+        let line = build_status_line(&model, now, GlyphMode::Nerd);
+        assert_eq!(line, "󰚩 ⠸ poll 󱑂 0s 󰏗 queued 󰅚 0");
     }
 
     #[test]
-    fn loading_status_lines_use_next_poll_when_not_polling() {
+    fn loading_status_line_uses_next_poll_when_not_polling() {
         let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
 
         let mut model = TuiModel::new(10);
@@ -1029,33 +888,74 @@ mod tests {
         model.next_poll_at = Some(chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 5, 0).unwrap());
         model.status_line = "ok (new=2)".to_string();
 
-        let [line1, line2, _line3] = build_status_lines(&model, now, GlyphMode::Ascii);
-        assert_eq!(line1, "+ ready");
-        assert_eq!(line2, "next 2025-01-01 00:05:00Z | refresh none");
+        let line = build_status_line(&model, now, GlyphMode::Ascii);
+        assert_eq!(line, "+ ready next=01-01 00:05 fail=0");
     }
 
     #[test]
-    fn loading_status_lines_show_error_detail_only_for_failure_states() {
+    fn loading_status_line_shows_error_detail_for_failure_states() {
         let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
 
         let mut model = TuiModel::new(10);
         model.status_line = "open failed: browser missing".to_string();
-        let [line_error, _, _] = build_status_lines(&model, now, GlyphMode::Ascii);
-        assert_eq!(line_error, "! open failed: browser missing");
+        let line_error = build_status_line(&model, now, GlyphMode::Ascii);
+        assert_eq!(line_error, "! open failed: browser missing fail=0");
 
         model.status_line = "opened: https://example.com/x".to_string();
-        let [line_ok, _, _] = build_status_lines(&model, now, GlyphMode::Ascii);
-        assert_eq!(line_ok, "+ ready");
+        let line_ok = build_status_line(&model, now, GlyphMode::Ascii);
+        assert_eq!(line_ok, "+ ready next=- fail=0");
     }
 
     #[test]
-    fn loading_status_lines_show_quit_armed_label() {
+    fn loading_status_line_shows_quit_armed_label() {
         let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
         let mut model = TuiModel::new(10);
         model.status_line = "press Esc again to quit (1.5s)".to_string();
 
-        let [line1, _, _] = build_status_lines(&model, now, GlyphMode::Ascii);
-        assert_eq!(line1, "> quit armed");
+        let line = build_status_line(&model, now, GlyphMode::Ascii);
+        assert_eq!(line, "> quit armed next=- fail=0");
+    }
+
+    #[test]
+    fn keys_line_is_single_dense_row() {
+        let line = build_keys_line(GlyphMode::Ascii);
+        assert_eq!(
+            line,
+            "q quit | Esc Esc | r refresh | Tab switch | ? help | Enter open | jk/UD PgUpDn g/G"
+        );
+    }
+
+    #[test]
+    fn selected_line_compacts_event_detail_into_single_line() {
+        let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let mut model = TuiModel::new(10);
+        model.replace_timeline(vec![event("a", now)]);
+        let line = build_selected_line(&model, GlyphMode::Ascii, 200);
+        assert_eq!(
+            line,
+            "I-CMT | acme/api | @dev | comment | https://example.com/a"
+        );
+    }
+
+    #[test]
+    fn selected_line_truncates_to_available_width() {
+        let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let mut model = TuiModel::new(10);
+        let mut long_event = event("a", now);
+        long_event.title = "a very very very long title that must be clipped".to_string();
+        model.replace_timeline(vec![long_event]);
+        let line = build_selected_line(&model, GlyphMode::Ascii, 40);
+        assert!(line.chars().count() <= 40);
+        assert!(line.ends_with("..."));
+    }
+
+    #[test]
+    fn ui_layout_uses_compact_panel_heights() {
+        let layout = ui_layout(Rect::new(0, 0, 120, 40));
+        assert_eq!(layout.status.height, 3);
+        assert_eq!(layout.tabs.height, 3);
+        assert_eq!(layout.selected.height, 3);
+        assert_eq!(layout.keys.height, 3);
     }
 
     #[test]
@@ -1094,11 +994,8 @@ mod tests {
     }
 
     #[test]
-    fn timeline_column_mode_uses_expected_boundaries() {
-        assert_eq!(timeline_column_mode(99), TimelineColumnMode::TitleOnly);
-        assert_eq!(timeline_column_mode(100), TimelineColumnMode::Compact);
-        assert_eq!(timeline_column_mode(114), TimelineColumnMode::Compact);
-        assert_eq!(timeline_column_mode(115), TimelineColumnMode::Full);
+    fn timeline_uses_minimum_column_set() {
+        assert_eq!(timeline_column_count(), 4);
     }
 
     #[test]

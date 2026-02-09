@@ -378,6 +378,31 @@ VALUES (?1, ?2, ?3)
 
 fn timeline_event_count(state_db_path: &Path) -> i64 {
     let conn = rusqlite::Connection::open(state_db_path).unwrap();
-    conn.query_row("SELECT COUNT(*) FROM timeline_events", [], |row| row.get(0))
-        .unwrap()
+    let has_event_log_v2: i64 = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_log_v2')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if has_event_log_v2 == 1 {
+        return conn
+            .query_row("SELECT COUNT(*) FROM event_log_v2", [], |row| row.get(0))
+            .unwrap();
+    }
+
+    let has_legacy_timeline: i64 = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='timeline_events')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if has_legacy_timeline == 1 {
+        return conn
+            .query_row("SELECT COUNT(*) FROM timeline_events", [], |row| row.get(0))
+            .unwrap();
+    }
+
+    0
 }

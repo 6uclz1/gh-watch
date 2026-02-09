@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use futures_util::stream::{self, StreamExt};
 use serde::Serialize;
-use std::time::Duration as StdDuration;
+use std::{collections::HashSet, time::Duration as StdDuration};
 
 use crate::{
     config::Config,
@@ -10,10 +10,11 @@ use crate::{
         events::{event_matches_notification_filters, EventKind, WatchEvent},
         failure::{FailureRecord, FAILURE_KIND_NOTIFICATION, FAILURE_KIND_REPO_POLL},
     },
-    ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
+    ports::{ClockPort, GhClientPort, NotifierPort, RepoPersistBatch, StateStorePort},
 };
 
-const NOTIFICATION_MAX_ATTEMPTS: usize = 2;
+const POLL_OVERLAP_SECONDS: i64 = 300;
+const NOTIFICATION_QUEUE_DRAIN_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PollOutcome {
@@ -23,13 +24,21 @@ pub struct PollOutcome {
     pub failures: Vec<FailureRecord>,
     pub notified_events: Vec<WatchEvent>,
     pub timeline_events: Vec<WatchEvent>,
+    pub pending_notification_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RepoPollPlan {
+    repo_name: String,
+    since: chrono::DateTime<Utc>,
+    poll_started_at: chrono::DateTime<Utc>,
+    is_bootstrap: bool,
+    allowed_event_kinds: Vec<EventKind>,
 }
 
 enum RepoFetchResult {
     Fetched {
-        repo_name: String,
-        is_bootstrap: bool,
-        allowed_event_kinds: Vec<EventKind>,
+        plan: RepoPollPlan,
         events: Vec<WatchEvent>,
     },
     Failed {
@@ -38,11 +47,12 @@ enum RepoFetchResult {
     },
 }
 
-struct RepoFetchRequest {
-    repo_name: String,
-    since: chrono::DateTime<Utc>,
-    is_bootstrap: bool,
-    allowed_event_kinds: Vec<EventKind>,
+struct RepoEventProcessingContext<'a, S, N, K> {
+    config: &'a Config,
+    state: &'a S,
+    notifier: &'a N,
+    clock: &'a K,
+    viewer_login: Option<String>,
 }
 
 pub async fn poll_once<C, S, N, K>(
@@ -71,102 +81,29 @@ where
     };
 
     let mut outcome = PollOutcome::default();
-    let mut repos_to_fetch = Vec::new();
-
-    for repo in config.repositories.iter().filter(|r| r.enabled) {
-        let cursor = state
-            .get_cursor(&repo.name)
-            .with_context(|| format!("failed to load cursor for {}", repo.name))?;
-        let allowed_event_kinds = repo
-            .event_kinds
-            .clone()
-            .unwrap_or_else(|| config.filters.event_kinds.clone());
-
-        let Some(since) = cursor else {
-            outcome.bootstrap_repos += 1;
-            if config.bootstrap_lookback_hours == 0 {
-                state
-                    .set_cursor(&repo.name, now)
-                    .with_context(|| format!("failed to set bootstrap cursor for {}", repo.name))?;
-                continue;
-            }
-
-            repos_to_fetch.push(RepoFetchRequest {
-                repo_name: repo.name.clone(),
-                since: bootstrap_since(now, config.bootstrap_lookback_hours),
-                is_bootstrap: true,
-                allowed_event_kinds,
-            });
-            continue;
-        };
-
-        repos_to_fetch.push(RepoFetchRequest {
-            repo_name: repo.name.clone(),
-            since,
-            is_bootstrap: false,
-            allowed_event_kinds,
-        });
-    }
-
-    let timeout = StdDuration::from_secs(config.poll.timeout_seconds);
-    let max_concurrency = config.poll.max_concurrency;
-    let timeout_seconds = config.poll.timeout_seconds;
-
-    let mut fetches = stream::iter(repos_to_fetch.into_iter().map(|request| async move {
-        let repo_name = request.repo_name;
-        let since = request.since;
-        let is_bootstrap = request.is_bootstrap;
-        let allowed_event_kinds = request.allowed_event_kinds;
-        let result = tokio::time::timeout(timeout, gh.fetch_repo_events(&repo_name, since)).await;
-        match result {
-            Ok(Ok(events)) => RepoFetchResult::Fetched {
-                repo_name,
-                is_bootstrap,
-                allowed_event_kinds,
-                events,
-            },
-            Ok(Err(err)) => RepoFetchResult::Failed {
-                repo_name,
-                error_message: err.to_string(),
-            },
-            Err(_) => RepoFetchResult::Failed {
-                repo_name,
-                error_message: format!("repo polling timed out after {timeout_seconds}s"),
-            },
-        }
-    }))
-    .buffer_unordered(max_concurrency);
+    let plans = plan_window(config, state, clock, &mut outcome)?;
+    let fetch_results = collect_events(config, gh, plans).await;
 
     let processing_context = RepoEventProcessingContext {
         config,
         state,
         notifier,
         clock,
-        now,
         viewer_login,
     };
 
-    while let Some(fetch_result) = fetches.next().await {
+    for fetch_result in fetch_results {
         match fetch_result {
-            RepoFetchResult::Fetched {
-                repo_name,
-                is_bootstrap,
-                allowed_event_kinds,
-                events,
-            } => {
-                if is_bootstrap {
-                    process_bootstrap_events(state, &mut outcome, repo_name.as_str(), events, now)?;
-                } else {
-                    process_repo_events(
-                        &processing_context,
+            RepoFetchResult::Fetched { plan, events } => {
+                let repo_name = plan.repo_name.clone();
+                if let Err(err) = persist_batch(&processing_context, &mut outcome, plan, events) {
+                    record_repo_poll_failure(
+                        state,
+                        clock,
                         &mut outcome,
-                        RepoEventBatch {
-                            repo_name: repo_name.as_str(),
-                            allowed_event_kinds: &allowed_event_kinds,
-                            ignore_actors: &config.filters.ignore_actors,
-                            events,
-                        },
-                    )?;
+                        repo_name.as_str(),
+                        format!("failed to persist repo batch: {err:#}").as_str(),
+                    );
                 }
             }
             RepoFetchResult::Failed {
@@ -178,11 +115,95 @@ where
                 &mut outcome,
                 repo_name.as_str(),
                 error_message.as_str(),
-            )?,
+            ),
         }
     }
 
+    drain_notification_queue(&processing_context, &mut outcome);
+    outcome.pending_notification_count = state.pending_notification_count().with_context(|| {
+        "failed to load pending notification count after queue drain".to_string()
+    })?;
+
     Ok(outcome)
+}
+
+fn plan_window<S, K>(
+    config: &Config,
+    state: &S,
+    clock: &K,
+    outcome: &mut PollOutcome,
+) -> Result<Vec<RepoPollPlan>>
+where
+    S: StateStorePort,
+    K: ClockPort,
+{
+    let mut plans = Vec::new();
+    for repo in config.repositories.iter().filter(|r| r.enabled) {
+        let cursor = match state
+            .get_cursor(&repo.name)
+            .with_context(|| format!("failed to load cursor for {}", repo.name))
+        {
+            Ok(cursor) => cursor,
+            Err(err) => {
+                record_repo_poll_failure(
+                    state,
+                    clock,
+                    outcome,
+                    repo.name.as_str(),
+                    format!("{err:#}").as_str(),
+                );
+                continue;
+            }
+        };
+
+        let poll_started_at = clock.now();
+        let allowed_event_kinds = repo
+            .event_kinds
+            .clone()
+            .unwrap_or_else(|| config.filters.event_kinds.clone());
+
+        let Some(cursor) = cursor else {
+            outcome.bootstrap_repos += 1;
+            if config.bootstrap_lookback_hours == 0 {
+                let batch = RepoPersistBatch {
+                    repo: repo.name.clone(),
+                    poll_started_at,
+                    events: Vec::new(),
+                    queue_notifications: false,
+                };
+                if let Err(err) = state.persist_repo_batch(&batch) {
+                    record_repo_poll_failure(
+                        state,
+                        clock,
+                        outcome,
+                        repo.name.as_str(),
+                        format!("failed to set bootstrap cursor for {}: {err:#}", repo.name)
+                            .as_str(),
+                    );
+                }
+                continue;
+            }
+
+            plans.push(RepoPollPlan {
+                repo_name: repo.name.clone(),
+                since: bootstrap_since(poll_started_at, config.bootstrap_lookback_hours),
+                poll_started_at,
+                is_bootstrap: true,
+                allowed_event_kinds,
+            });
+            continue;
+        };
+
+        plans.push(RepoPollPlan {
+            repo_name: repo.name.clone(),
+            since: with_fixed_overlap(cursor),
+            poll_started_at,
+            is_bootstrap: false,
+            allowed_event_kinds,
+        });
+    }
+
+    Ok(plans)
 }
 
 fn bootstrap_since(now: chrono::DateTime<Utc>, lookback_hours: u64) -> chrono::DateTime<Utc> {
@@ -191,153 +212,211 @@ fn bootstrap_since(now: chrono::DateTime<Utc>, lookback_hours: u64) -> chrono::D
         .unwrap_or(now)
 }
 
-struct RepoEventProcessingContext<'a, S, N, K> {
-    config: &'a Config,
-    state: &'a S,
-    notifier: &'a N,
-    clock: &'a K,
-    now: chrono::DateTime<Utc>,
-    viewer_login: Option<String>,
+fn with_fixed_overlap(cursor: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    cursor
+        .checked_sub_signed(Duration::seconds(POLL_OVERLAP_SECONDS))
+        .unwrap_or(cursor)
 }
 
-struct RepoEventBatch<'a> {
-    repo_name: &'a str,
-    allowed_event_kinds: &'a [EventKind],
-    ignore_actors: &'a [String],
-    events: Vec<WatchEvent>,
+async fn collect_events<C>(
+    config: &Config,
+    gh: &C,
+    plans: Vec<RepoPollPlan>,
+) -> Vec<RepoFetchResult>
+where
+    C: GhClientPort,
+{
+    let timeout = StdDuration::from_secs(config.poll.timeout_seconds);
+    let timeout_seconds = config.poll.timeout_seconds;
+    let mut fetches = stream::iter(plans.into_iter().map(|plan| async move {
+        let result =
+            tokio::time::timeout(timeout, gh.fetch_repo_events(&plan.repo_name, plan.since)).await;
+        match result {
+            Ok(Ok(events)) => RepoFetchResult::Fetched { plan, events },
+            Ok(Err(err)) => RepoFetchResult::Failed {
+                repo_name: plan.repo_name,
+                error_message: err.to_string(),
+            },
+            Err(_) => RepoFetchResult::Failed {
+                repo_name: plan.repo_name,
+                error_message: format!("repo polling timed out after {timeout_seconds}s"),
+            },
+        }
+    }))
+    .buffer_unordered(config.poll.max_concurrency);
+
+    let mut results = Vec::new();
+    while let Some(fetch_result) = fetches.next().await {
+        results.push(fetch_result);
+    }
+    results
 }
 
-fn process_repo_events<S, N, K>(
+fn persist_batch<S, N, K>(
     context: &RepoEventProcessingContext<'_, S, N, K>,
     outcome: &mut PollOutcome,
-    batch: RepoEventBatch<'_>,
+    plan: RepoPollPlan,
+    events: Vec<WatchEvent>,
 ) -> Result<()>
 where
     S: StateStorePort,
     N: NotifierPort,
     K: ClockPort,
 {
-    let RepoEventBatch {
-        repo_name,
-        allowed_event_kinds,
-        ignore_actors,
-        events,
-    } = batch;
+    let mut events = events
+        .into_iter()
+        .filter(|event| event.created_at <= plan.poll_started_at)
+        .collect::<Vec<_>>();
 
-    for event in events {
-        if !event_matches_notification_filters(
-            &event,
-            allowed_event_kinds,
-            ignore_actors,
-            context.config.filters.only_involving_me,
-            context.viewer_login.as_deref(),
-        ) {
-            continue;
-        }
-
-        let event_key = event.event_key();
-        let already_notified = context.state.is_event_notified(&event_key)?;
-        if already_notified {
-            continue;
-        }
-
-        let notification_failure = send_notification_with_retry(context, &event)
-            .map_err(|err| err.to_string())
-            .err();
-
-        context.state.append_timeline_event(&event)?;
-        context.state.record_notified_event(&event, context.now)?;
-        outcome.timeline_events.push(event.clone());
-
-        if let Some(err) = notification_failure {
-            let failure = FailureRecord::new(
-                FAILURE_KIND_NOTIFICATION,
-                event.repo.clone(),
-                context.clock.now(),
-                format!("{}: {}", event.event_key(), err),
-            );
-            context.state.record_failure(&failure).with_context(|| {
-                format!(
-                    "failed to record notification failure for {}",
-                    event.event_key()
-                )
-            })?;
-            outcome.failures.push(failure);
-            outcome.repo_errors.push(format!(
-                "notification failed for {}: {}",
-                event.event_key(),
-                err
-            ));
-            continue;
-        }
-
-        outcome.notified_count += 1;
-        outcome.notified_events.push(event);
+    if !plan.is_bootstrap {
+        events.retain(|event| {
+            event_matches_notification_filters(
+                event,
+                &plan.allowed_event_kinds,
+                &context.config.filters.ignore_actors,
+                context.config.filters.only_involving_me,
+                context.viewer_login.as_deref(),
+            )
+        });
     }
 
-    context
+    let batch = RepoPersistBatch {
+        repo: plan.repo_name.clone(),
+        poll_started_at: plan.poll_started_at,
+        events: events.clone(),
+        queue_notifications: !plan.is_bootstrap && context.config.notifications.enabled,
+    };
+    let persist_result = context
         .state
-        .set_cursor(repo_name, context.now)
-        .with_context(|| format!("failed to update cursor for {repo_name}"))?;
+        .persist_repo_batch(&batch)
+        .with_context(|| format!("failed to persist event batch for {}", plan.repo_name))?;
+
+    let newly_logged = persist_result
+        .newly_logged_event_keys
+        .into_iter()
+        .collect::<HashSet<_>>();
+    outcome.timeline_events.extend(
+        events
+            .into_iter()
+            .filter(|event| newly_logged.contains(&event.event_key())),
+    );
 
     Ok(())
 }
 
-fn send_notification_with_retry<S, N, K>(
+fn drain_notification_queue<S, N, K>(
     context: &RepoEventProcessingContext<'_, S, N, K>,
-    event: &WatchEvent,
-) -> Result<()>
-where
+    outcome: &mut PollOutcome,
+) where
     S: StateStorePort,
     N: NotifierPort,
     K: ClockPort,
 {
     if !context.config.notifications.enabled {
-        return Ok(());
+        return;
     }
 
-    let mut last_err = None;
-    for _ in 0..NOTIFICATION_MAX_ATTEMPTS {
+    let now = context.clock.now();
+    let due_items = match context
+        .state
+        .load_due_notifications(now, NOTIFICATION_QUEUE_DRAIN_LIMIT)
+    {
+        Ok(items) => items,
+        Err(err) => {
+            record_repo_poll_failure(
+                context.state,
+                context.clock,
+                outcome,
+                "<notification_queue>",
+                format!("failed to load due notifications: {err:#}").as_str(),
+            );
+            return;
+        }
+    };
+
+    for pending in due_items {
         match context
             .notifier
-            .notify(event, context.config.notifications.include_url)
+            .notify(&pending.event, context.config.notifications.include_url)
         {
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                if let Err(err) = context
+                    .state
+                    .mark_notification_delivered(&pending.event_key, now)
+                {
+                    record_repo_poll_failure(
+                        context.state,
+                        context.clock,
+                        outcome,
+                        pending.event.repo.as_str(),
+                        format!(
+                            "notification delivered but failed to persist delivery state for {}: {err:#}",
+                            pending.event_key
+                        )
+                        .as_str(),
+                    );
+                    continue;
+                }
+                outcome.notified_count += 1;
+                outcome.notified_events.push(pending.event);
+            }
             Err(err) => {
-                last_err = Some(err);
+                let attempts = pending.attempts.saturating_add(1);
+                let next_attempt_at =
+                    now + Duration::seconds(notification_retry_backoff_seconds(attempts) as i64);
+                let err_message = err.to_string();
+
+                if let Err(reschedule_err) = context.state.reschedule_notification(
+                    &pending.event_key,
+                    attempts,
+                    next_attempt_at,
+                    &err_message,
+                ) {
+                    record_repo_poll_failure(
+                        context.state,
+                        context.clock,
+                        outcome,
+                        pending.event.repo.as_str(),
+                        format!(
+                            "failed to reschedule notification for {}: {reschedule_err:#}",
+                            pending.event_key
+                        )
+                        .as_str(),
+                    );
+                }
+
+                let failure = FailureRecord::new(
+                    FAILURE_KIND_NOTIFICATION,
+                    pending.event.repo.clone(),
+                    context.clock.now(),
+                    format!("{}: {}", pending.event_key, err_message),
+                );
+                if let Err(record_err) = context.state.record_failure(&failure) {
+                    outcome.repo_errors.push(format!(
+                        "{}: notification failed for {} but failure record persistence failed: {}",
+                        pending.event.repo, pending.event_key, record_err
+                    ));
+                } else {
+                    outcome.failures.push(failure);
+                    outcome.repo_errors.push(format!(
+                        "{}: notification failed for {}: {}",
+                        pending.event.repo, pending.event_key, err_message
+                    ));
+                }
             }
         }
     }
-
-    if let Some(err) = last_err {
-        Err(err)
-    } else {
-        Err(anyhow!(
-            "notification retry loop exhausted without an error value"
-        ))
-    }
 }
 
-fn process_bootstrap_events<S>(
-    state: &S,
-    outcome: &mut PollOutcome,
-    repo_name: &str,
-    events: Vec<WatchEvent>,
-    now: chrono::DateTime<Utc>,
-) -> Result<()>
-where
-    S: StateStorePort,
-{
-    for event in events {
-        state.append_timeline_event(&event)?;
-        outcome.timeline_events.push(event);
+fn notification_retry_backoff_seconds(attempts: u32) -> u64 {
+    match attempts {
+        0 => 0,
+        1 => 30,
+        2 => 120,
+        3 => 600,
+        4 => 3600,
+        _ => 21600,
     }
-
-    state
-        .set_cursor(repo_name, now)
-        .with_context(|| format!("failed to update cursor for {repo_name}"))?;
-
-    Ok(())
 }
 
 fn record_repo_poll_failure<S, K>(
@@ -346,8 +425,7 @@ fn record_repo_poll_failure<S, K>(
     outcome: &mut PollOutcome,
     repo_name: &str,
     error_message: &str,
-) -> Result<()>
-where
+) where
     S: StateStorePort,
     K: ClockPort,
 {
@@ -357,12 +435,13 @@ where
         clock.now(),
         error_message.to_string(),
     );
-    state
-        .record_failure(&failure)
-        .with_context(|| format!("failed to record repo polling failure for {repo_name}"))?;
-    outcome.failures.push(failure);
-    outcome
-        .repo_errors
-        .push(format!("{repo_name}: {error_message}"));
-    Ok(())
+
+    let mut rendered = format!("{repo_name}: {error_message}");
+    if let Err(err) = state.record_failure(&failure) {
+        rendered.push_str(&format!(" | failed to persist failure record: {err}"));
+    } else {
+        outcome.failures.push(failure);
+    }
+
+    outcome.repo_errors.push(rendered);
 }

@@ -117,10 +117,11 @@ Global filter keys:
 ## Timeline-First Notification Semantics
 
 - First run bootstraps cursor and does not notify.
-- Notifications are deduplicated by `event_key` (processing checkpoint).
-- Notification delivery is attempted up to 2 times within the same poll cycle.
-- Even if notification still fails, the event is reflected in Timeline and marked processed.
-- Cursor always advances to poll time (`now`) without rollback on notification failure.
+- Polling uses a fixed 5-minute overlap (`since = last_cursor - 300s`) to reduce boundary misses.
+- Per-repository cursor is updated to poll start time (not post-processing `now`).
+- New events are durably persisted first, then notifications are sent from `notification_queue_v2`.
+- Notification failures remain pending and are retried in future polls with backoff.
+- `event_key` deduplicates overlap re-fetches while preserving at-least-once delivery behavior.
 - Repository-level failures do not block other repositories.
 
 ## TUI Key Bindings
@@ -155,6 +156,8 @@ Default state DB path:
 - Windows: `%LOCALAPPDATA%\gh-watch\state.db`
 
 Use `config.example.toml` as a shareable template.
+
+If your `state.db` was created by an older release, run `gh-watch init --reset-state`.
 
 ## Notification Sender IDs
 

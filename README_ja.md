@@ -115,10 +115,11 @@ gh-watch watch
 ## Timeline優先の通知セマンティクス
 
 - 初回はカーソル初期化のみ（通知なし）
-- `event_key` を処理済みチェックポイントとして重複処理を防止
-- 通知送信は同一poll内で最大2回試行（初回 + 1回再試行）
-- 通知が最終的に失敗しても Timeline には反映し、処理完了扱いにする
-- 通知失敗時でもカーソルは巻き戻さず `now` へ進める
+- ポーリング境界取りこぼし対策として、固定5分オーバーラップ（`since = last_cursor - 300秒`）を利用
+- リポジトリごとのカーソルは poll 開始時刻で更新（処理後の `now` ではない）
+- 新規イベントは先に永続化し、通知は `notification_queue_v2` から非同期に送信
+- 通知失敗時は pending のまま残し、次回以降の poll でバックオフ再試行
+- `event_key` で重複取得を吸収しつつ、at-least-once 配信を維持
 - あるリポジトリの失敗が他リポジトリを止めない
 
 ## TUI キーバインド
@@ -151,6 +152,8 @@ gh-watch watch
 - Windows: `%LOCALAPPDATA%\gh-watch\state.db`
 
 共有用テンプレートは `config.example.toml` を利用してください。
+
+旧バージョンで作成した `state.db` を使っている場合は `gh-watch init --reset-state` を実行してください。
 
 ## 通知 Sender ID
 

@@ -142,21 +142,23 @@ exit 1
         .success();
 
     let conn = rusqlite::Connection::open(&state_db_path).unwrap();
-    let notified_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM notified_events", [], |row| row.get(0))
+    let queued_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM notification_queue_v2", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     let timeline_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM timeline_events", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM event_log_v2", [], |row| row.get(0))
         .unwrap();
     let cursor_after: String = conn
         .query_row(
-            "SELECT last_polled_at FROM polling_cursors WHERE repo = ?1",
+            "SELECT last_polled_at FROM polling_cursors_v2 WHERE repo = ?1",
             rusqlite::params!["acme/api"],
             |row| row.get(0),
         )
         .unwrap();
 
-    assert_eq!(notified_count, 0);
+    assert_eq!(queued_count, 0);
     assert_eq!(timeline_count, 0);
     assert_eq!(cursor_after, cursor.to_rfc3339());
 }
@@ -271,6 +273,96 @@ exit 1
         .stdout(contains("state db:"));
 }
 
+#[test]
+fn doctor_fails_with_reset_hint_when_state_schema_is_legacy() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let state_db_path = dir.path().join("state.db");
+    write_config(&config_path, &state_db_path, &["acme/api"]);
+    seed_legacy_state_db(&state_db_path);
+
+    let gh_path = write_stub_gh(
+        dir.path(),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "auth" && "$2" == "status" ]]; then
+  exit 0
+fi
+echo "unexpected args: $@" >&2
+exit 1
+"#,
+    );
+
+    let mut cmd = cargo_bin_cmd!("gh-watch");
+    cmd.arg("doctor")
+        .arg("--config")
+        .arg(&config_path)
+        .env("GH_WATCH_GH_BIN", gh_path)
+        .assert()
+        .failure()
+        .stderr(contains("init --reset-state"));
+}
+
+#[test]
+fn check_fails_with_reset_hint_when_state_schema_is_legacy() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let state_db_path = dir.path().join("state.db");
+    write_config(&config_path, &state_db_path, &["acme/api"]);
+    seed_legacy_state_db(&state_db_path);
+
+    let gh_path = write_stub_gh(
+        dir.path(),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "auth" && "$2" == "status" ]]; then
+  exit 0
+fi
+echo "unexpected args: $@" >&2
+exit 1
+"#,
+    );
+
+    let mut cmd = cargo_bin_cmd!("gh-watch");
+    cmd.arg("check")
+        .arg("--config")
+        .arg(&config_path)
+        .env("GH_WATCH_GH_BIN", gh_path)
+        .assert()
+        .failure()
+        .stderr(contains("init --reset-state"));
+}
+
+#[test]
+fn once_fails_with_reset_hint_when_state_schema_is_legacy() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let state_db_path = dir.path().join("state.db");
+    write_config(&config_path, &state_db_path, &["acme/api"]);
+    seed_legacy_state_db(&state_db_path);
+
+    let gh_path = write_stub_gh(
+        dir.path(),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "auth" && "$2" == "status" ]]; then
+  exit 0
+fi
+echo "unexpected args: $@" >&2
+exit 1
+"#,
+    );
+
+    let mut cmd = cargo_bin_cmd!("gh-watch");
+    cmd.arg("once")
+        .arg("--config")
+        .arg(&config_path)
+        .env("GH_WATCH_GH_BIN", gh_path)
+        .assert()
+        .failure()
+        .stderr(contains("init --reset-state"));
+}
+
 fn write_stub_gh(dir: &Path, script: &str) -> PathBuf {
     let path = dir.join("gh");
     fs::write(&path, script).unwrap();
@@ -342,4 +434,18 @@ fn seed_report_data(state_db_path: &Path) {
             "temporary failure",
         ))
         .unwrap();
+}
+
+fn seed_legacy_state_db(state_db_path: &Path) {
+    let conn = rusqlite::Connection::open(state_db_path).unwrap();
+    conn.execute_batch(
+        "
+CREATE TABLE timeline_events (
+  event_key TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+",
+    )
+    .unwrap();
 }

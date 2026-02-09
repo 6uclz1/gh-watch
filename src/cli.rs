@@ -18,8 +18,15 @@ use crate::{
         default_state_db_path, installed_config_path, load_config_with_path, parse_config,
         resolution_candidates, resolve_config_path_with_source, Config, ResolvedConfigPath,
     },
-    infra::{gh_client::GhCliClient, notifier::DesktopNotifier, state_sqlite::SqliteStateStore},
-    ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
+    infra::{
+        gh_client::GhCliClient,
+        notifier::DesktopNotifier,
+        state_sqlite::{SqliteStateStore, StateSchemaMismatchError},
+    },
+    ports::{
+        ClockPort, GhClientPort, NotifierPort, PendingNotification, PersistBatchResult,
+        RepoPersistBatch, StateStorePort,
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -189,7 +196,7 @@ fn run_init_reset_state_cmd(config_path: Option<PathBuf>, interactive: bool) -> 
 
     let state_db_path = resolve_state_db_path_for_reset(config_path.as_deref())?;
     remove_state_db_files(&state_db_path)?;
-    let _store = SqliteStateStore::new(&state_db_path)?;
+    let _store = open_state_store(&state_db_path)?;
 
     println!("reset state db: {}", state_db_path.display());
     println!("state db initialized");
@@ -241,6 +248,19 @@ fn state_db_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
+fn open_state_store(path: &Path) -> Result<SqliteStateStore> {
+    SqliteStateStore::new(path).map_err(|err| {
+        if err.downcast_ref::<StateSchemaMismatchError>().is_some() {
+            anyhow!(
+                "state db schema is incompatible: {} (run `gh-watch init --reset-state`)",
+                path.display()
+            )
+        } else {
+            err
+        }
+    })
+}
+
 async fn run_check_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Result<()> {
     let gh = GhCliClient::default();
     gh.check_auth()
@@ -256,7 +276,7 @@ async fn run_check_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Resu
         .context("Notification backend check failed")?;
 
     let state_path = resolve_state_db_path(&cfg)?;
-    let _store = SqliteStateStore::new(&state_path)?;
+    let _store = open_state_store(&state_path)?;
 
     println!(
         "config: {} (source: {})",
@@ -282,7 +302,7 @@ async fn run_watch_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Resu
         .context("GitHub authentication is invalid. Run `gh auth login -h github.com`.")?;
 
     let state_path = resolve_state_db_path(&cfg)?;
-    let state = SqliteStateStore::new(&state_path)?;
+    let state = open_state_store(&state_path)?;
 
     let notifier = DesktopNotifier::from_notification_config(&cfg.notifications);
     for warning in notifier.startup_warnings() {
@@ -361,6 +381,40 @@ where
     ) -> Result<()> {
         Ok(())
     }
+
+    fn persist_repo_batch(&self, _batch: &RepoPersistBatch) -> Result<PersistBatchResult> {
+        Ok(PersistBatchResult::default())
+    }
+
+    fn load_due_notifications(
+        &self,
+        _now: DateTime<Utc>,
+        _limit: usize,
+    ) -> Result<Vec<PendingNotification>> {
+        Ok(Vec::new())
+    }
+
+    fn mark_notification_delivered(
+        &self,
+        _event_key: &str,
+        _delivered_at: DateTime<Utc>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn reschedule_notification(
+        &self,
+        _event_key: &str,
+        _attempts: u32,
+        _next_attempt_at: DateTime<Utc>,
+        _last_error: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn pending_notification_count(&self) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -387,7 +441,7 @@ async fn run_once_cmd(
         .context("GitHub authentication is invalid. Run `gh auth login -h github.com`.")?;
 
     let state_path = resolve_state_db_path(&cfg)?;
-    let state = SqliteStateStore::new(&state_path)?;
+    let state = open_state_store(&state_path)?;
 
     let notifier = DesktopNotifier::from_notification_config(&cfg.notifications);
     if let Err(err) = notifier.check_health() {
@@ -410,6 +464,10 @@ async fn run_once_cmd(
             resolved_config.source
         );
         println!("notified: {}", outcome.notified_count);
+        println!(
+            "pending_notifications: {}",
+            outcome.pending_notification_count
+        );
         println!("bootstrap_repos: {}", outcome.bootstrap_repos);
         println!("repo_errors: {}", outcome.repo_errors.len());
         if dry_run {
@@ -440,7 +498,7 @@ async fn run_report_cmd(
         .ok_or_else(|| anyhow!("failed to resolve report time window"))?;
 
     let state_path = resolve_state_db_path(&cfg)?;
-    let state = SqliteStateStore::new(&state_path)?;
+    let state = open_state_store(&state_path)?;
     let events = state.load_timeline_events_since(start, 5000)?;
     let failures = state.load_failures_since(start, 5000)?;
 
@@ -493,7 +551,7 @@ async fn run_doctor_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Res
     }
 
     let state_path = resolve_state_db_path(&cfg)?;
-    let _store = SqliteStateStore::new(&state_path)?;
+    let _store = open_state_store(&state_path)?;
     println!("state db: {}", state_path.display());
 
     Ok(())

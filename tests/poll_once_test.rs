@@ -206,11 +206,29 @@ impl StateStorePort for FakeState {
 struct FakeNotifier {
     sent: Arc<Mutex<Vec<String>>>,
     fail_once: Arc<Mutex<HashSet<String>>>,
+    fail_always: Arc<Mutex<HashSet<String>>>,
+    attempted_calls: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeNotifier {
     fn fail_once_for(&self, event_key: &str) {
         self.fail_once.lock().unwrap().insert(event_key.to_string());
+    }
+
+    fn fail_always_for(&self, event_key: &str) {
+        self.fail_always
+            .lock()
+            .unwrap()
+            .insert(event_key.to_string());
+    }
+
+    fn attempts_for(&self, event_key: &str) -> usize {
+        self.attempted_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|k| k.as_str() == event_key)
+            .count()
     }
 }
 
@@ -225,8 +243,12 @@ impl NotifierPort for FakeNotifier {
 
     fn notify(&self, event: &WatchEvent, _include_url: bool) -> Result<NotificationDispatchResult> {
         let event_key = event.event_key();
+        self.attempted_calls.lock().unwrap().push(event_key.clone());
         if self.fail_once.lock().unwrap().remove(&event_key) {
             return Err(anyhow!("notify failed once"));
+        }
+        if self.fail_always.lock().unwrap().contains(&event_key) {
+            return Err(anyhow!("notify failed always"));
         }
         self.sent.lock().unwrap().push(event_key);
         Ok(NotificationDispatchResult::Delivered)
@@ -784,7 +806,7 @@ async fn repo_failure_does_not_block_others() {
 }
 
 #[tokio::test]
-async fn notification_failure_retries_failed_event_without_duplicating_successes() {
+async fn retry_once_then_success_in_same_poll() {
     let event_time = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
     let first = sample_event_at("acme/api", "123", event_time);
     let second = sample_event_at("acme/api", "456", event_time);
@@ -825,21 +847,21 @@ async fn notification_failure_retries_failed_event_without_duplicating_successes
     let out1 = poll_once(&cfg(), &gh, &state, &notifier, &c1)
         .await
         .unwrap();
-    assert_eq!(out1.notified_count, 1);
-    assert_eq!(out1.repo_errors.len(), 1);
-    assert_eq!(out1.failures.len(), 1);
-    assert_eq!(out1.failures[0].kind, FAILURE_KIND_NOTIFICATION);
-    assert_eq!(
-        state.get_cursor("acme/api").unwrap().unwrap(),
-        event_time - chrono::Duration::nanoseconds(1)
-    );
+    assert_eq!(out1.notified_count, 2);
+    assert!(out1.repo_errors.is_empty());
+    assert!(out1.failures.is_empty());
+    assert_eq!(out1.timeline_events.len(), 2);
+    assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c1.now);
+    assert_eq!(notifier.attempts_for(&first.event_key()), 1);
+    assert_eq!(notifier.attempts_for(&second.event_key()), 2);
 
     let out2 = poll_once(&cfg(), &gh, &state, &notifier, &c2)
         .await
         .unwrap();
-    assert_eq!(out2.notified_count, 1);
+    assert_eq!(out2.notified_count, 0);
     assert!(out2.repo_errors.is_empty());
     assert!(out2.failures.is_empty());
+    assert!(out2.timeline_events.is_empty());
     assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c2.now);
 
     let out3 = poll_once(&cfg(), &gh, &state, &notifier, &c3)
@@ -853,6 +875,107 @@ async fn notification_failure_retries_failed_event_without_duplicating_successes
         notifier.sent.lock().unwrap().as_slice(),
         &[first.event_key(), second.event_key()]
     );
+}
+
+#[tokio::test]
+async fn retry_exhausted_still_reflects_timeline_and_stops_future_retry() {
+    let event_time = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
+    let first = sample_event_at("acme/api", "123", event_time);
+    let second = sample_event_at("acme/api", "456", event_time);
+
+    let gh = FakeGh::default();
+    gh.repos
+        .lock()
+        .unwrap()
+        .insert("acme/api".to_string(), vec![first.clone(), second.clone()]);
+
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+
+    let notifier = FakeNotifier::default();
+    notifier.fail_always_for(&second.event_key());
+
+    let c1 = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
+    };
+    let c2 = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 4, 0, 0, 0).unwrap(),
+    };
+
+    let out1 = poll_once(&cfg(), &gh, &state, &notifier, &c1)
+        .await
+        .unwrap();
+    assert_eq!(out1.notified_count, 1);
+    assert_eq!(out1.repo_errors.len(), 1);
+    assert_eq!(out1.failures.len(), 1);
+    assert_eq!(out1.failures[0].kind, FAILURE_KIND_NOTIFICATION);
+    assert_eq!(out1.timeline_events.len(), 2);
+    assert_eq!(state.timeline.lock().unwrap().len(), 2);
+    assert_eq!(state.notified.lock().unwrap().len(), 2);
+    assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c1.now);
+    assert_eq!(notifier.attempts_for(&second.event_key()), 2);
+
+    let out2 = poll_once(&cfg(), &gh, &state, &notifier, &c2)
+        .await
+        .unwrap();
+    assert_eq!(out2.notified_count, 0);
+    assert!(out2.repo_errors.is_empty());
+    assert!(out2.failures.is_empty());
+    assert!(out2.timeline_events.is_empty());
+    assert_eq!(state.timeline.lock().unwrap().len(), 2);
+    assert_eq!(notifier.attempts_for(&second.event_key()), 2);
+}
+
+#[tokio::test]
+async fn cursor_does_not_roll_back_on_notification_failure_when_timeline_prioritized() {
+    let event_time = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
+    let event = sample_event_at("acme/api", "cursor-no-rollback", event_time);
+
+    let gh = FakeGh::default();
+    gh.repos
+        .lock()
+        .unwrap()
+        .insert("acme/api".to_string(), vec![event.clone()]);
+
+    let state = FakeState::default();
+    state
+        .set_cursor(
+            "acme/api",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    state
+        .set_cursor(
+            "acme/web",
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+
+    let notifier = FakeNotifier::default();
+    notifier.fail_always_for(&event.event_key());
+    let c1 = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
+    };
+
+    let out = poll_once(&cfg(), &gh, &state, &notifier, &c1)
+        .await
+        .unwrap();
+
+    assert_eq!(out.notified_count, 0);
+    assert_eq!(out.repo_errors.len(), 1);
+    assert_eq!(out.timeline_events.len(), 1);
+    assert_eq!(state.get_cursor("acme/api").unwrap().unwrap(), c1.now);
 }
 
 #[tokio::test]

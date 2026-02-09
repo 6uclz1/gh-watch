@@ -237,17 +237,18 @@ where
 {
     match result {
         Ok(outcome) => {
-            if !outcome.timeline_events.is_empty() {
+            let new_count = outcome.timeline_events.len();
+            if new_count > 0 {
                 model.push_timeline(outcome.timeline_events);
             }
             if outcome.repo_errors.is_empty() {
-                model.status_line = format!("ok (new={})", outcome.notified_count);
+                model.status_line = format!("ok (new={new_count})");
                 model.last_success_at = Some(clock.now());
             } else {
                 model.status_line = format!(
                     "partial errors={} (new={})",
                     outcome.repo_errors.len(),
-                    outcome.notified_count
+                    new_count
                 );
                 model.failure_count += outcome.repo_errors.len() as u64;
             }
@@ -449,7 +450,10 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
 
-    use super::{enabled_repository_names, handle_stream_event, LoopControl, PollExecutionState};
+    use super::{
+        apply_poll_result, enabled_repository_names, handle_stream_event, LoopControl,
+        PollExecutionState, PollOutcome,
+    };
     use crate::{
         config::{Config, FiltersConfig, NotificationConfig, PollConfig, RepositoryConfig},
         domain::{
@@ -695,6 +699,33 @@ mod tests {
             watched,
             vec!["acme/one".to_string(), "acme/three".to_string()]
         );
+    }
+
+    #[test]
+    fn watch_status_new_uses_timeline_reflections() {
+        let state = FakeState::default();
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 8, 12, 0, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+
+        let outcome = PollOutcome {
+            timeline_events: vec![
+                timeline_event("ev-a", clock.now),
+                timeline_event("ev-b", clock.now),
+            ],
+            ..PollOutcome::default()
+        };
+        apply_poll_result(Ok(outcome), &mut model, &state, &clock);
+        assert_eq!(model.status_line, "ok (new=2)");
+
+        let outcome = PollOutcome {
+            repo_errors: vec!["notify failed".to_string()],
+            timeline_events: vec![timeline_event("ev-c", clock.now)],
+            ..PollOutcome::default()
+        };
+        apply_poll_result(Ok(outcome), &mut model, &state, &clock);
+        assert_eq!(model.status_line, "partial errors=1 (new=1)");
     }
 
     #[test]

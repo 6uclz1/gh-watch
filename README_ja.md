@@ -74,22 +74,15 @@ gh-watch watch
 
 - `gh-watch watch [--config <path>] [--interval-seconds <n>]`
 - `gh-watch once [--config <path>] [--dry-run] [--json]`
-- `gh-watch report [--config <path>] [--since <duration>] [--format markdown|json]`
-- `gh-watch doctor [--config <path>]`
 - `gh-watch check [--config <path>]`
-- `gh-watch notification-test`
-- `gh-watch init [--path <path>] [--force] [--interactive] [--reset-state]`
-- `gh-watch config open|edit`
+- `gh-watch init [--path <path>] [--force] [--reset-state]`
+- `gh-watch config open`
 - `gh-watch config path`
-- `gh-watch config doctor`
-
-`notification-test` は notifier の送信関数を直接呼び出して、デバッグ用に通知を1回送信します。
 
 ### `once` の終了コード
 
 - `0`: 成功
-- `2`: 一部リポジトリで失敗（部分失敗）
-- `1`: 致命的エラー
+- `1`: 失敗
 
 ## 監視イベント
 
@@ -121,9 +114,8 @@ gh-watch watch
 - ポーリング境界取りこぼし対策として、固定5分オーバーラップ（`since = last_cursor - 300秒`）を利用
 - リポジトリごとのカーソルは poll 開始時刻で更新（処理後の `now` ではない）
 - 新規イベントは先に永続化し、同一 poll 内で即時通知
-- 通知失敗は `failure_events` に記録し、自動再試行はしない
 - `event_key` で重複取得を吸収し、既に記録済みのイベントを再通知しない
-- あるリポジトリの失敗が他リポジトリを止めない
+- 取得/通知のエラーは fail-fast でそのサイクルを即失敗にする
 
 ## TUI キーバインド
 

@@ -34,7 +34,6 @@ name = "octocat/hello-world"
     assert_eq!(cfg.bootstrap_lookback_hours, 24);
     assert_eq!(cfg.timeline_limit, 500);
     assert_eq!(cfg.retention_days, 90);
-    assert_eq!(cfg.failure_history_limit, 200);
     assert_eq!(cfg.repositories.len(), 1);
     assert!(cfg.repositories[0].enabled);
     assert!(cfg.notifications.enabled);
@@ -67,16 +66,18 @@ name = "octocat/hello-world"
 }
 
 #[test]
-fn parse_config_rejects_zero_failure_history_limit() {
+fn parse_config_rejects_removed_failure_history_limit_key() {
     let src = r#"
-failure_history_limit = 0
+failure_history_limit = 200
 
 [[repositories]]
 name = "octocat/hello-world"
 "#;
 
-    let err = parse_config(src).expect_err("zero limit should fail");
-    assert!(err.to_string().contains("failure_history_limit"));
+    let err = parse_config(src).expect_err("removed key should fail");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("failed to parse config TOML"));
+    assert!(msg.contains("failure_history_limit"));
 }
 
 #[test]
@@ -108,7 +109,7 @@ name = "octocat/hello-world"
 }
 
 #[test]
-fn parse_config_accepts_zero_bootstrap_lookback_for_legacy_mode() {
+fn parse_config_rejects_zero_bootstrap_lookback_hours() {
     let src = r#"
 bootstrap_lookback_hours = 0
 
@@ -116,8 +117,8 @@ bootstrap_lookback_hours = 0
 name = "octocat/hello-world"
 "#;
 
-    let cfg = parse_config(src).expect("zero bootstrap lookback should be accepted");
-    assert_eq!(cfg.bootstrap_lookback_hours, 0);
+    let err = parse_config(src).expect_err("zero bootstrap lookback should fail");
+    assert!(err.to_string().contains("bootstrap_lookback_hours"));
 }
 
 #[test]

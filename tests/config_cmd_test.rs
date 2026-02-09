@@ -33,65 +33,42 @@ fn config_open_fails_when_config_is_missing() {
 }
 
 #[test]
-fn config_doctor_reports_missing_selected_config() {
+fn config_doctor_is_unavailable() {
     let dir = tempdir().unwrap();
 
     let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("config")
         .arg("doctor")
         .current_dir(dir.path())
-        .env_remove("GH_WATCH_CONFIG")
         .assert()
-        .success()
-        .stdout(contains("selected:"))
-        .stdout(contains("next: run `gh-watch init`"));
+        .failure()
+        .stderr(contains("unrecognized subcommand"));
 }
 
 #[test]
-fn config_doctor_reports_parse_error_for_invalid_selected_config() {
+fn config_edit_alias_is_unavailable() {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("config.toml"), "not = [valid").unwrap();
+    fs::write(
+        dir.path().join("config.toml"),
+        "[[repositories]]\nname = \"acme/api\"\n",
+    )
+    .unwrap();
 
     let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("config")
         .arg("doctor")
         .current_dir(dir.path())
-        .env_remove("GH_WATCH_CONFIG")
         .assert()
-        .success()
-        .stdout(contains("doctor: selected config has errors"))
-        .stdout(contains("parse=error"));
-}
-
-#[cfg(unix)]
-#[test]
-fn config_edit_alias_uses_visual_editor() {
-    let dir = tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    fs::write(&config_path, "[[repositories]]\nname = \"acme/api\"\n").unwrap();
-
-    let marker = dir.path().join("marker.txt");
-    let visual = dir.path().join("visual-editor");
-    write_executable(
-        &visual,
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-echo "visual:$1" > "$MARKER"
-"#,
-    );
+        .failure()
+        .stderr(contains("unrecognized subcommand"));
 
     let mut cmd = cargo_bin_cmd!("gh-watch");
     cmd.arg("config")
         .arg("edit")
         .current_dir(dir.path())
-        .env("VISUAL", &visual)
-        .env_remove("EDITOR")
-        .env("MARKER", &marker)
         .assert()
-        .success();
-
-    let got = fs::read_to_string(&marker).unwrap();
-    assert_marker_path(&got, "visual:", &config_path);
+        .failure()
+        .stderr(contains("unrecognized subcommand"));
 }
 
 #[cfg(unix)]

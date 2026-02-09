@@ -74,22 +74,15 @@ gh-watch watch
 
 - `gh-watch watch [--config <path>] [--interval-seconds <n>]`
 - `gh-watch once [--config <path>] [--dry-run] [--json]`
-- `gh-watch report [--config <path>] [--since <duration>] [--format markdown|json]`
-- `gh-watch doctor [--config <path>]`
 - `gh-watch check [--config <path>]`
-- `gh-watch notification-test`
-- `gh-watch init [--path <path>] [--force] [--interactive] [--reset-state]`
-- `gh-watch config open|edit`
+- `gh-watch init [--path <path>] [--force] [--reset-state]`
+- `gh-watch config open`
 - `gh-watch config path`
-- `gh-watch config doctor`
-
-`notification-test` sends one debug notification by directly calling the notifier dispatch function.
 
 ### `once` Exit Codes
 
 - `0`: success
-- `2`: partial failure (one or more repositories failed)
-- `1`: fatal failure
+- `1`: any failure
 
 ## Events
 
@@ -123,9 +116,8 @@ Global filter keys:
 - Polling uses a fixed 5-minute overlap (`since = last_cursor - 300s`) to reduce boundary misses.
 - Per-repository cursor is updated to poll start time (not post-processing `now`).
 - New events are durably persisted first, then notified immediately in the same poll cycle.
-- Notification failures are recorded in `failure_events` and are not retried automatically.
 - `event_key` deduplicates overlap re-fetches and prevents re-notifying already logged events.
-- Repository-level failures do not block other repositories.
+- Polling and notification errors fail the current cycle immediately (fail-fast).
 
 ## TUI Key Bindings
 

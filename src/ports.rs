@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::domain::{events::WatchEvent, failure::FailureRecord};
+use crate::domain::events::WatchEvent;
 
 #[async_trait]
 pub trait GhClientPort: Send + Sync {
@@ -28,20 +28,10 @@ pub struct PersistBatchResult {
 pub trait StateStorePort: Send + Sync {
     fn get_cursor(&self, repo: &str) -> Result<Option<DateTime<Utc>>>;
     fn set_cursor(&self, repo: &str, at: DateTime<Utc>) -> Result<()>;
-    fn is_event_notified(&self, event_key: &str) -> Result<bool>;
-    fn record_notified_event(&self, event: &WatchEvent, notified_at: DateTime<Utc>) -> Result<()>;
-    fn record_failure(&self, failure: &FailureRecord) -> Result<()>;
-    fn latest_failure(&self) -> Result<Option<FailureRecord>>;
-    fn append_timeline_event(&self, event: &WatchEvent) -> Result<()>;
     fn load_timeline_events(&self, limit: usize) -> Result<Vec<WatchEvent>>;
     fn mark_timeline_event_read(&self, event_key: &str, read_at: DateTime<Utc>) -> Result<()>;
     fn load_read_event_keys(&self, event_keys: &[String]) -> Result<HashSet<String>>;
-    fn cleanup_old(
-        &self,
-        retention_days: u32,
-        failure_history_limit: usize,
-        now: DateTime<Utc>,
-    ) -> Result<()>;
+    fn cleanup_old(&self, retention_days: u32, now: DateTime<Utc>) -> Result<()>;
     fn persist_repo_batch(&self, batch: &RepoPersistBatch) -> Result<PersistBatchResult>;
 }
 

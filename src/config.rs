@@ -12,6 +12,7 @@ use serde::Deserialize;
 use crate::domain::events::EventKind;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "default_interval_seconds")]
     pub interval_seconds: u64,
@@ -21,8 +22,6 @@ pub struct Config {
     pub timeline_limit: usize,
     #[serde(default = "default_retention_days")]
     pub retention_days: u32,
-    #[serde(default = "default_failure_history_limit")]
-    pub failure_history_limit: usize,
     pub state_db_path: Option<String>,
     pub repositories: Vec<RepositoryConfig>,
     #[serde(default)]
@@ -71,6 +70,7 @@ impl Display for ConfigPathSource {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryConfig {
     pub name: String,
     #[serde(default = "default_true")]
@@ -98,6 +98,7 @@ impl Default for NotificationConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct FiltersConfig {
     #[serde(default)]
     pub event_kinds: Vec<EventKind>,
@@ -108,6 +109,7 @@ pub struct FiltersConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PollConfig {
     #[serde(default = "default_poll_max_concurrency")]
     pub max_concurrency: usize,
@@ -138,10 +140,6 @@ fn default_timeline_limit() -> usize {
 
 fn default_retention_days() -> u32 {
     90
-}
-
-fn default_failure_history_limit() -> usize {
-    200
 }
 
 fn default_true() -> bool {
@@ -307,12 +305,12 @@ fn validate_config(cfg: &Config) -> Result<()> {
         return Err(anyhow!("interval_seconds must be >= 1"));
     }
 
-    if cfg.timeline_limit == 0 {
-        return Err(anyhow!("timeline_limit must be >= 1"));
+    if cfg.bootstrap_lookback_hours == 0 {
+        return Err(anyhow!("bootstrap_lookback_hours must be >= 1"));
     }
 
-    if cfg.failure_history_limit == 0 {
-        return Err(anyhow!("failure_history_limit must be >= 1"));
+    if cfg.timeline_limit == 0 {
+        return Err(anyhow!("timeline_limit must be >= 1"));
     }
 
     if cfg.poll.max_concurrency == 0 {

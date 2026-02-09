@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    app::{poll_once::poll_once, watch_loop::run_watch},
+    app::{notification_test::run_notification_test, poll_once::poll_once, watch_loop::run_watch},
     config::{
         default_state_db_path, installed_config_path, load_config_with_path, parse_config,
         resolution_candidates, resolve_config_path_with_source, Config, ResolvedConfigPath,
@@ -24,8 +24,8 @@ use crate::{
         state_sqlite::{SqliteStateStore, StateSchemaMismatchError},
     },
     ports::{
-        ClockPort, GhClientPort, NotifierPort, PendingNotification, PersistBatchResult,
-        RepoPersistBatch, StateStorePort,
+        ClockPort, GhClientPort, NotificationDispatchResult, NotifierPort, PendingNotification,
+        PersistBatchResult, RepoPersistBatch, StateStorePort,
     },
 };
 
@@ -71,6 +71,7 @@ enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    NotificationTest,
     Init {
         #[arg(long)]
         path: Option<PathBuf>,
@@ -168,6 +169,7 @@ pub async fn run() -> Result<()> {
             let loaded = load_config_with_path(config.as_deref())?;
             run_doctor_cmd(loaded.config, loaded.resolved_path).await
         }
+        Commands::NotificationTest => run_notification_test_cmd(),
         Commands::Init {
             path,
             force,
@@ -555,6 +557,35 @@ async fn run_doctor_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Res
     println!("state db: {}", state_path.display());
 
     Ok(())
+}
+
+fn run_notification_test_cmd() -> Result<()> {
+    println!("notification-test: start");
+
+    let notifier = DesktopNotifier::default();
+    for warning in notifier.startup_warnings() {
+        println!("notification-test: warning: {warning}");
+    }
+
+    println!("notification-test: sending test notification");
+    let outcome = run_notification_test(&notifier)?;
+    println!(
+        "notification-test: delivered (dispatch={})",
+        format_notification_dispatch_result(outcome.dispatch_result)
+    );
+    println!("notification-test: event_key={}", outcome.event_key);
+
+    Ok(())
+}
+
+fn format_notification_dispatch_result(result: NotificationDispatchResult) -> &'static str {
+    match result {
+        NotificationDispatchResult::Delivered => "delivered",
+        NotificationDispatchResult::DeliveredWithClickAction => "delivered_with_click_action",
+        NotificationDispatchResult::DeliveredWithBodyUrlFallback => {
+            "delivered_with_body_url_fallback"
+        }
+    }
 }
 
 fn parse_since_duration(raw: &str) -> Result<Duration> {

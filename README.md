@@ -77,10 +77,13 @@ gh-watch watch
 - `gh-watch report [--config <path>] [--since <duration>] [--format markdown|json]`
 - `gh-watch doctor [--config <path>]`
 - `gh-watch check [--config <path>]`
+- `gh-watch notification-test`
 - `gh-watch init [--path <path>] [--force] [--interactive] [--reset-state]`
 - `gh-watch config open|edit`
 - `gh-watch config path`
 - `gh-watch config doctor`
+
+`notification-test` sends one debug notification by directly calling the notifier dispatch function.
 
 ### `once` Exit Codes
 

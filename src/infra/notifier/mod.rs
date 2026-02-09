@@ -1,17 +1,15 @@
-use anyhow::{anyhow, Result};
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
+use anyhow::Result;
+#[cfg(target_os = "macos")]
+use anyhow::{anyhow, Context};
 
 use crate::{
     config::NotificationConfig,
     domain::events::WatchEvent,
     ports::{NotificationClickSupport, NotificationDispatchResult, NotifierPort},
 };
-
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "windows")]
-mod windows;
 
 pub fn build_notification_body(event: &WatchEvent, include_url: bool) -> String {
     let mut lines = vec![format!("{} by @{}", event.title, event.actor)];
@@ -25,160 +23,70 @@ fn build_notification_title(event: &WatchEvent) -> String {
     format!("{} [{}]", event.repo, event.kind)
 }
 
-#[derive(Debug, Clone, Default)]
-pub(super) struct PlatformNotificationOptions {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(super) macos_bundle_id: Option<String>,
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub(super) windows_app_id: Option<String>,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(super) wsl_windows_app_id: Option<String>,
-}
-
-impl PlatformNotificationOptions {
-    fn from_notification_config(config: &NotificationConfig) -> Self {
-        Self {
-            macos_bundle_id: config.macos_bundle_id.clone(),
-            windows_app_id: config.windows_app_id.clone(),
-            wsl_windows_app_id: config.wsl_windows_app_id.clone(),
-        }
-    }
-
-    fn startup_warnings(&self) -> Vec<String> {
-        #[cfg(target_os = "macos")]
-        {
-            if macos::effective_bundle_id(self.macos_bundle_id.as_deref())
-                == macos::DEFAULT_BUNDLE_ID
-            {
-                vec![format!(
-                    "notifications.macos_bundle_id is not set; using default {}",
-                    macos::DEFAULT_BUNDLE_ID
-                )]
-            } else {
-                Vec::new()
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            if windows::effective_app_id(self.windows_app_id.as_deref()) == windows::DEFAULT_APP_ID
-            {
-                vec![
-                    "notifications.windows_app_id is not set; using default PowerShell AppUserModelID"
-                        .to_string(),
-                ]
-            } else {
-                Vec::new()
-            }
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            Vec::new()
-        }
+fn dispatch_result(include_url: bool) -> NotificationDispatchResult {
+    if include_url {
+        NotificationDispatchResult::DeliveredWithBodyUrlFallback
+    } else {
+        NotificationDispatchResult::Delivered
     }
 }
 
-trait PlatformNotifier {
-    fn check_health(&self) -> Result<()>;
-    fn click_action_support(&self) -> NotificationClickSupport;
-    fn notify(&self, title: &str, body: &str, click_url: Option<&str>) -> Result<()>;
-}
-
-#[derive(Debug, Clone)]
-struct SystemPlatformNotifier {
-    options: PlatformNotificationOptions,
-}
-
-impl PlatformNotifier for SystemPlatformNotifier {
-    fn check_health(&self) -> Result<()> {
-        platform::check_health(&self.options)
-    }
-
-    fn click_action_support(&self) -> NotificationClickSupport {
-        platform::click_action_support()
-    }
-
-    fn notify(&self, title: &str, body: &str, click_url: Option<&str>) -> Result<()> {
-        platform::notify(title, body, click_url, &self.options)
-    }
-}
-
-fn dispatch_notification<P: PlatformNotifier>(
-    platform: &P,
-    event: &WatchEvent,
-    include_url: bool,
-) -> Result<NotificationDispatchResult> {
-    let title = build_notification_title(event);
-    let body = build_notification_body(event, include_url);
-
-    match platform.click_action_support() {
-        NotificationClickSupport::Supported => {
-            match platform.notify(&title, &body, Some(&event.url)) {
-                Ok(()) => Ok(NotificationDispatchResult::DeliveredWithClickAction),
-                Err(click_err) => {
-                    platform
-                    .notify(&title, &body, None)
-                    .map_err(|fallback_err| {
-                        anyhow!(
-                            "notification click-action failed: {click_err}; fallback delivery also failed: {fallback_err}"
-                        )
-                    })?;
-                    if include_url {
-                        Ok(NotificationDispatchResult::DeliveredWithBodyUrlFallback)
-                    } else {
-                        Ok(NotificationDispatchResult::Delivered)
-                    }
-                }
-            }
-        }
-        NotificationClickSupport::Unsupported => {
-            platform.notify(&title, &body, None)?;
-            if include_url {
-                Ok(NotificationDispatchResult::DeliveredWithBodyUrlFallback)
-            } else {
-                Ok(NotificationDispatchResult::Delivered)
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct DesktopNotifier {
-    platform: SystemPlatformNotifier,
-}
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DesktopNotifier;
 
 impl DesktopNotifier {
-    pub fn from_notification_config(config: &NotificationConfig) -> Self {
-        Self {
-            platform: SystemPlatformNotifier {
-                options: PlatformNotificationOptions::from_notification_config(config),
-            },
-        }
+    pub fn from_notification_config(_config: &NotificationConfig) -> Self {
+        Self
     }
 
     pub fn startup_warnings(&self) -> Vec<String> {
-        self.platform.options.startup_warnings()
-    }
-}
+        #[cfg(target_os = "macos")]
+        {
+            Vec::new()
+        }
 
-impl Default for DesktopNotifier {
-    fn default() -> Self {
-        Self::from_notification_config(&NotificationConfig::default())
+        #[cfg(not(target_os = "macos"))]
+        {
+            vec![
+                "osascript notifications are only supported on macOS; using noop notifier"
+                    .to_string(),
+            ]
+        }
     }
 }
 
 impl NotifierPort for DesktopNotifier {
     fn check_health(&self) -> Result<()> {
-        self.platform.check_health()
+        #[cfg(target_os = "macos")]
+        {
+            check_osascript_available()
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(())
+        }
     }
 
     fn click_action_support(&self) -> NotificationClickSupport {
-        self.platform.click_action_support()
+        NotificationClickSupport::Unsupported
     }
 
     fn notify(&self, event: &WatchEvent, include_url: bool) -> Result<NotificationDispatchResult> {
-        dispatch_notification(&self.platform, event, include_url)
+        let title = build_notification_title(event);
+        let body = build_notification_body(event, include_url);
+
+        #[cfg(target_os = "macos")]
+        {
+            notify_via_osascript(&title, &body)?;
+            Ok(dispatch_result(include_url))
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (title, body);
+            Ok(dispatch_result(include_url))
+        }
     }
 }
 
@@ -204,98 +112,85 @@ impl NotifierPort for NoopNotifier {
 }
 
 #[cfg(target_os = "macos")]
-mod platform {
-    pub use super::macos::{check_health, click_action_support, notify};
-}
+fn check_osascript_available() -> Result<()> {
+    let output = Command::new("osascript")
+        .args(["-e", "return \"ok\""])
+        .output()
+        .context("failed to execute osascript")?;
 
-#[cfg(target_os = "linux")]
-mod platform {
-    pub use super::linux::{check_health, click_action_support, notify};
-}
-
-#[cfg(target_os = "windows")]
-mod platform {
-    pub use super::windows::{check_health, click_action_support, notify};
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-mod platform {
-    use anyhow::Result;
-
-    use super::PlatformNotificationOptions;
-    use crate::ports::NotificationClickSupport;
-
-    pub fn check_health(_options: &PlatformNotificationOptions) -> Result<()> {
-        Ok(())
+    if output.status.success() {
+        return Ok(());
     }
 
-    pub fn click_action_support() -> NotificationClickSupport {
-        NotificationClickSupport::Unsupported
+    Err(render_osascript_failure(
+        "health-check",
+        &output.stdout,
+        &output.stderr,
+        output.status,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn notify_via_osascript(title: &str, body: &str) -> Result<()> {
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        escape_apple_script_literal(body),
+        escape_apple_script_literal(title)
+    );
+
+    let output = Command::new("osascript")
+        .args(["-e", script.as_str()])
+        .output()
+        .context("failed to execute osascript")?;
+
+    if output.status.success() {
+        return Ok(());
     }
 
-    pub fn notify(
-        _title: &str,
-        _body: &str,
-        _click_url: Option<&str>,
-        _options: &PlatformNotificationOptions,
-    ) -> Result<()> {
-        Ok(())
+    Err(render_osascript_failure(
+        "notify",
+        &output.stdout,
+        &output.stderr,
+        output.status,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn render_osascript_failure(
+    operation: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+    status: std::process::ExitStatus,
+) -> anyhow::Error {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+
+    if detail.is_empty() {
+        anyhow!("osascript {} failed with status {}", operation, status)
+    } else {
+        anyhow!(
+            "osascript {} failed with status {}: {}",
+            operation,
+            status,
+            detail
+        )
     }
+}
+
+#[cfg(target_os = "macos")]
+fn escape_apple_script_literal(raw: &str) -> String {
+    raw.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
     use chrono::{TimeZone, Utc};
 
-    use super::{build_notification_body, dispatch_notification, PlatformNotifier};
-    use crate::{
-        domain::events::{EventKind, WatchEvent},
-        ports::{NotificationClickSupport, NotificationDispatchResult},
-    };
-
-    type NotificationCall = (String, String, Option<String>);
-    type NotificationCalls = Arc<Mutex<Vec<NotificationCall>>>;
-
-    #[derive(Clone)]
-    struct FakePlatform {
-        support: NotificationClickSupport,
-        fail_click_delivery: bool,
-        calls: NotificationCalls,
-    }
-
-    impl FakePlatform {
-        fn new(support: NotificationClickSupport) -> Self {
-            Self {
-                support,
-                fail_click_delivery: false,
-                calls: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-    }
-
-    impl PlatformNotifier for FakePlatform {
-        fn check_health(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn click_action_support(&self) -> NotificationClickSupport {
-            self.support
-        }
-
-        fn notify(&self, title: &str, body: &str, click_url: Option<&str>) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push((
-                title.to_string(),
-                body.to_string(),
-                click_url.map(ToString::to_string),
-            ));
-            if self.fail_click_delivery && click_url.is_some() {
-                return Err(anyhow::anyhow!("click delivery failed"));
-            }
-            Ok(())
-        }
-    }
+    use super::{build_notification_body, DesktopNotifier};
+    use crate::domain::events::{EventKind, WatchEvent};
 
     fn sample_event() -> WatchEvent {
         WatchEvent {
@@ -314,110 +209,31 @@ mod tests {
     }
 
     #[test]
-    fn click_supported_uses_click_action_and_preserves_include_url_behavior() {
-        let platform = FakePlatform::new(NotificationClickSupport::Supported);
-        let event = sample_event();
-
-        let dispatch = dispatch_notification(&platform, &event, false).unwrap();
-
-        assert_eq!(
-            dispatch,
-            NotificationDispatchResult::DeliveredWithClickAction
-        );
-        let calls = platform.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].2.as_deref(), Some(event.url.as_str()));
-        assert!(!calls[0].1.contains("https://example.com/pr/1"));
-    }
-
-    #[test]
-    fn click_unsupported_falls_back_to_body_url() {
-        let platform = FakePlatform::new(NotificationClickSupport::Unsupported);
-        let event = sample_event();
-
-        let dispatch = dispatch_notification(&platform, &event, true).unwrap();
-
-        assert_eq!(
-            dispatch,
-            NotificationDispatchResult::DeliveredWithBodyUrlFallback
-        );
-        let calls = platform.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0].1.contains("https://example.com/pr/1"));
-        assert!(calls[0].2.is_none());
-    }
-
-    #[test]
-    fn click_delivery_failure_falls_back_without_failing_notification() {
-        let mut platform = FakePlatform::new(NotificationClickSupport::Supported);
-        platform.fail_click_delivery = true;
-        let event = sample_event();
-
-        let dispatch = dispatch_notification(&platform, &event, true).unwrap();
-
-        assert_eq!(
-            dispatch,
-            NotificationDispatchResult::DeliveredWithBodyUrlFallback
-        );
-        let calls = platform.calls.lock().unwrap();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].2.as_deref(), Some(event.url.as_str()));
-        assert!(calls[1].2.is_none());
-    }
-
-    #[test]
     fn notification_body_contains_url_when_requested() {
-        let event = sample_event();
-        let body = build_notification_body(&event, true);
+        let body = build_notification_body(&sample_event(), true);
         assert!(body.contains("https://example.com/pr/1"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_prefers_reliable_body_url_delivery_over_click_action() {
-        assert_eq!(
-            super::platform::click_action_support(),
-            NotificationClickSupport::Unsupported
-        );
+    fn startup_warnings_macos_are_empty() {
+        let notifier = DesktopNotifier;
+        assert!(notifier.startup_warnings().is_empty());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn startup_warnings_non_macos_warns_noop() {
+        let notifier = DesktopNotifier;
+        let warnings = notifier.startup_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("only supported on macOS"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn startup_warnings_macos_warn_when_bundle_id_uses_default() {
-        let notifier = super::DesktopNotifier::default();
-        let warnings = notifier.startup_warnings();
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("notifications.macos_bundle_id"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn startup_warnings_macos_are_empty_when_bundle_id_configured() {
-        let cfg = crate::config::NotificationConfig {
-            macos_bundle_id: Some("com.example.CustomMacApp".to_string()),
-            ..crate::config::NotificationConfig::default()
-        };
-        let notifier = super::DesktopNotifier::from_notification_config(&cfg);
-        assert!(notifier.startup_warnings().is_empty());
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn startup_warnings_windows_warn_when_app_id_uses_default() {
-        let notifier = super::DesktopNotifier::default();
-        let warnings = notifier.startup_warnings();
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("notifications.windows_app_id"));
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn startup_warnings_windows_are_empty_when_app_id_configured() {
-        let cfg = crate::config::NotificationConfig {
-            windows_app_id: Some("com.example.CustomWinApp".to_string()),
-            ..crate::config::NotificationConfig::default()
-        };
-        let notifier = super::DesktopNotifier::from_notification_config(&cfg);
-        assert!(notifier.startup_warnings().is_empty());
+    fn escape_apple_script_literal_escapes_quotes_and_newlines() {
+        let escaped = super::escape_apple_script_literal("a\n\"b\"");
+        assert_eq!(escaped, "a\\n\\\"b\\\"");
     }
 }

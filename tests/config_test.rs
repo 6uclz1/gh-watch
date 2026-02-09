@@ -39,9 +39,6 @@ name = "octocat/hello-world"
     assert!(cfg.repositories[0].enabled);
     assert!(cfg.notifications.enabled);
     assert!(cfg.notifications.include_url);
-    assert!(cfg.notifications.macos_bundle_id.is_none());
-    assert!(cfg.notifications.windows_app_id.is_none());
-    assert!(cfg.notifications.wsl_windows_app_id.is_none());
     assert!(cfg.filters.event_kinds.is_empty());
     assert!(cfg.filters.ignore_actors.is_empty());
     assert!(!cfg.filters.only_involving_me);
@@ -50,7 +47,7 @@ name = "octocat/hello-world"
 }
 
 #[test]
-fn parse_config_parses_notification_platform_sender_ids() {
+fn parse_config_rejects_removed_notification_sender_keys() {
     let src = r#"
 [notifications]
 enabled = true
@@ -63,19 +60,10 @@ wsl_windows_app_id = "com.example.CustomWslApp"
 name = "octocat/hello-world"
 "#;
 
-    let cfg = parse_config(src).expect("config should parse");
-    assert_eq!(
-        cfg.notifications.macos_bundle_id.as_deref(),
-        Some("com.example.CustomMacApp")
-    );
-    assert_eq!(
-        cfg.notifications.windows_app_id.as_deref(),
-        Some("com.example.CustomWinApp")
-    );
-    assert_eq!(
-        cfg.notifications.wsl_windows_app_id.as_deref(),
-        Some("com.example.CustomWslApp")
-    );
+    let err = parse_config(src).expect_err("removed keys should be rejected");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("failed to parse config TOML"));
+    assert!(msg.contains("macos_bundle_id"));
 }
 
 #[test]

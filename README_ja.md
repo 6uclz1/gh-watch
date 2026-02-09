@@ -11,7 +11,7 @@ English README: [README.md](README.md)
 1. 1つの設定で複数リポジトリを監視
 2. PR / Issue / コメント / レビュー / マージを通知
 3. SQLite の event key で再起動後も重複通知を防止
-4. 通知失敗時もタイムライン反映を優先し、同一poll内で1回再試行
+4. 新規に観測したイベントごとに通知は最大1回のみ
 
 ## デモ
 
@@ -120,9 +120,9 @@ gh-watch watch
 - 初回はカーソル初期化のみ（通知なし）
 - ポーリング境界取りこぼし対策として、固定5分オーバーラップ（`since = last_cursor - 300秒`）を利用
 - リポジトリごとのカーソルは poll 開始時刻で更新（処理後の `now` ではない）
-- 新規イベントは先に永続化し、通知は `notification_queue_v2` から非同期に送信
-- 通知失敗時は pending のまま残し、次回以降の poll でバックオフ再試行
-- `event_key` で重複取得を吸収しつつ、at-least-once 配信を維持
+- 新規イベントは先に永続化し、同一 poll 内で即時通知
+- 通知失敗は `failure_events` に記録し、自動再試行はしない
+- `event_key` で重複取得を吸収し、既に記録済みのイベントを再通知しない
 - あるリポジトリの失敗が他リポジトリを止めない
 
 ## TUI キーバインド
@@ -158,24 +158,16 @@ gh-watch watch
 
 旧バージョンで作成した `state.db` を使っている場合は `gh-watch init --reset-state` を実行してください。
 
-## 通知 Sender ID
+通知設定キー:
 
-- macOS:
-  - `notifications.macos_bundle_id` を指定可能（未指定時の既定値: `com.apple.Terminal`）
-  - 未指定時は `check` / `watch` 起動時に警告を表示
-- Windows:
-  - `notifications.windows_app_id` を指定可能
-  - 未指定時の既定値は PowerShell の AppUserModelID（`Toast::POWERSHELL_APP_ID`）
-  - 未指定時は `check` / `watch` 起動時に警告を表示
-- WSL（LinuxバイナリをWSL上で実行する場合）:
-  - Linuxデスクトップ通知ではなく `powershell.exe` 経由の Windows Toast を使用
-  - `notifications.wsl_windows_app_id` を指定可能（WSL時は `notifications.windows_app_id` を参照しない）
-  - 未指定時の既定値は PowerShell の AppUserModelID
-  - Toast 送信失敗時は `stderr` を優先し、`stderr` が空の場合は `stdout` を warning に含める
-  - `powershell.exe` が利用できない場合:
-    - `gh-watch check` は失敗終了
-    - `gh-watch doctor` / `gh-watch watch` / `gh-watch once` は warning を表示して継続
-- 最終的なバナー表示有無は OS 側の通知設定に依存
+- `[notifications].enabled`
+- `[notifications].include_url`
+
+## 通知バックエンド
+
+- macOS: `osascript`（`display notification`）で通知
+- 非 macOS: 通知は Noop（起動時に warning を表示）
+- 最終的なバナー表示有無は OS 側の通知設定やフォーカスモードに依存
 
 ## 開発時の品質ゲート
 

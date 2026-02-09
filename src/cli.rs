@@ -24,8 +24,8 @@ use crate::{
         state_sqlite::{SqliteStateStore, StateSchemaMismatchError},
     },
     ports::{
-        ClockPort, GhClientPort, NotificationDispatchResult, NotifierPort, PendingNotification,
-        PersistBatchResult, RepoPersistBatch, StateStorePort,
+        ClockPort, GhClientPort, NotificationDispatchResult, NotifierPort, PersistBatchResult,
+        RepoPersistBatch, StateStorePort,
     },
 };
 
@@ -387,36 +387,6 @@ where
     fn persist_repo_batch(&self, _batch: &RepoPersistBatch) -> Result<PersistBatchResult> {
         Ok(PersistBatchResult::default())
     }
-
-    fn load_due_notifications(
-        &self,
-        _now: DateTime<Utc>,
-        _limit: usize,
-    ) -> Result<Vec<PendingNotification>> {
-        Ok(Vec::new())
-    }
-
-    fn mark_notification_delivered(
-        &self,
-        _event_key: &str,
-        _delivered_at: DateTime<Utc>,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    fn reschedule_notification(
-        &self,
-        _event_key: &str,
-        _attempts: u32,
-        _next_attempt_at: DateTime<Utc>,
-        _last_error: &str,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    fn pending_notification_count(&self) -> Result<usize> {
-        Ok(0)
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -466,10 +436,6 @@ async fn run_once_cmd(
             resolved_config.source
         );
         println!("notified: {}", outcome.notified_count);
-        println!(
-            "pending_notifications: {}",
-            outcome.pending_notification_count
-        );
         println!("bootstrap_repos: {}", outcome.bootstrap_repos);
         println!("repo_errors: {}", outcome.repo_errors.len());
         if dry_run {
@@ -562,7 +528,7 @@ async fn run_doctor_cmd(cfg: Config, resolved_config: ResolvedConfigPath) -> Res
 fn run_notification_test_cmd() -> Result<()> {
     println!("notification-test: start");
 
-    let notifier = DesktopNotifier::default();
+    let notifier = DesktopNotifier;
     for warning in notifier.startup_warnings() {
         println!("notification-test: warning: {warning}");
     }
@@ -1030,9 +996,6 @@ fn render_config(
     out.push_str("[notifications]\n");
     out.push_str(&format!("enabled = {notifications_enabled}\n"));
     out.push_str(&format!("include_url = {include_url}\n"));
-    out.push_str("# macos_bundle_id = \"com.apple.Terminal\"\n");
-    out.push_str("# windows_app_id = \"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\"\n");
-    out.push_str("# wsl_windows_app_id = \"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\"\n");
     out.push('\n');
     out.push_str("[poll]\n");
     out.push_str("max_concurrency = 4\n");

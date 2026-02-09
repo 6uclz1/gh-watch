@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, Utc};
 use futures_util::stream::{self, StreamExt};
 use serde::Serialize;
@@ -13,6 +13,8 @@ use crate::{
     ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
 };
 
+const NOTIFICATION_MAX_ATTEMPTS: usize = 2;
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PollOutcome {
     pub notified_count: usize,
@@ -26,7 +28,6 @@ pub struct PollOutcome {
 enum RepoFetchResult {
     Fetched {
         repo_name: String,
-        since: chrono::DateTime<Utc>,
         is_bootstrap: bool,
         allowed_event_kinds: Vec<EventKind>,
         events: Vec<WatchEvent>,
@@ -120,7 +121,6 @@ where
         match result {
             Ok(Ok(events)) => RepoFetchResult::Fetched {
                 repo_name,
-                since,
                 is_bootstrap,
                 allowed_event_kinds,
                 events,
@@ -150,7 +150,6 @@ where
         match fetch_result {
             RepoFetchResult::Fetched {
                 repo_name,
-                since,
                 is_bootstrap,
                 allowed_event_kinds,
                 events,
@@ -163,7 +162,6 @@ where
                         &mut outcome,
                         RepoEventBatch {
                             repo_name: repo_name.as_str(),
-                            since,
                             allowed_event_kinds: &allowed_event_kinds,
                             ignore_actors: &config.filters.ignore_actors,
                             events,
@@ -204,7 +202,6 @@ struct RepoEventProcessingContext<'a, S, N, K> {
 
 struct RepoEventBatch<'a> {
     repo_name: &'a str,
-    since: chrono::DateTime<Utc>,
     allowed_event_kinds: &'a [EventKind],
     ignore_actors: &'a [String],
     events: Vec<WatchEvent>,
@@ -222,12 +219,10 @@ where
 {
     let RepoEventBatch {
         repo_name,
-        since,
         allowed_event_kinds,
         ignore_actors,
         events,
     } = batch;
-    let mut earliest_notification_failure_at: Option<chrono::DateTime<Utc>> = None;
 
     for event in events {
         if !event_matches_notification_filters(
@@ -246,64 +241,81 @@ where
             continue;
         }
 
-        if context.config.notifications.enabled {
-            match context
-                .notifier
-                .notify(&event, context.config.notifications.include_url)
-            {
-                Ok(_) => {}
-                Err(err) => {
-                    let failure = FailureRecord::new(
-                        FAILURE_KIND_NOTIFICATION,
-                        event.repo.clone(),
-                        context.clock.now(),
-                        format!("{}: {}", event.event_key(), err),
-                    );
-                    context.state.record_failure(&failure).with_context(|| {
-                        format!(
-                            "failed to record notification failure for {}",
-                            event.event_key()
-                        )
-                    })?;
-                    outcome.failures.push(failure);
-                    outcome.repo_errors.push(format!(
-                        "notification failed for {}: {}",
-                        event.event_key(),
-                        err
-                    ));
-                    earliest_notification_failure_at = Some(
-                        earliest_notification_failure_at
-                            .map(|at| at.min(event.created_at))
-                            .unwrap_or(event.created_at),
-                    );
-                    // Keep the event unrecorded if notification delivery failed.
-                    continue;
-                }
-            }
+        let notification_failure = send_notification_with_retry(context, &event)
+            .map_err(|err| err.to_string())
+            .err();
+
+        context.state.append_timeline_event(&event)?;
+        context.state.record_notified_event(&event, context.now)?;
+        outcome.timeline_events.push(event.clone());
+
+        if let Some(err) = notification_failure {
+            let failure = FailureRecord::new(
+                FAILURE_KIND_NOTIFICATION,
+                event.repo.clone(),
+                context.clock.now(),
+                format!("{}: {}", event.event_key(), err),
+            );
+            context.state.record_failure(&failure).with_context(|| {
+                format!(
+                    "failed to record notification failure for {}",
+                    event.event_key()
+                )
+            })?;
+            outcome.failures.push(failure);
+            outcome.repo_errors.push(format!(
+                "notification failed for {}: {}",
+                event.event_key(),
+                err
+            ));
+            continue;
         }
 
-        context.state.record_notified_event(&event, context.now)?;
-        context.state.append_timeline_event(&event)?;
         outcome.notified_count += 1;
-        outcome.notified_events.push(event.clone());
-        outcome.timeline_events.push(event);
+        outcome.notified_events.push(event);
     }
-
-    let next_cursor = if let Some(failure_at) = earliest_notification_failure_at {
-        // Keep failed events in the next query window (`created_at > cursor`).
-        failure_at
-            .checked_sub_signed(Duration::nanoseconds(1))
-            .unwrap_or(since)
-    } else {
-        context.now
-    };
 
     context
         .state
-        .set_cursor(repo_name, next_cursor)
+        .set_cursor(repo_name, context.now)
         .with_context(|| format!("failed to update cursor for {repo_name}"))?;
 
     Ok(())
+}
+
+fn send_notification_with_retry<S, N, K>(
+    context: &RepoEventProcessingContext<'_, S, N, K>,
+    event: &WatchEvent,
+) -> Result<()>
+where
+    S: StateStorePort,
+    N: NotifierPort,
+    K: ClockPort,
+{
+    if !context.config.notifications.enabled {
+        return Ok(());
+    }
+
+    let mut last_err = None;
+    for _ in 0..NOTIFICATION_MAX_ATTEMPTS {
+        match context
+            .notifier
+            .notify(event, context.config.notifications.include_url)
+        {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                last_err = Some(err);
+            }
+        }
+    }
+
+    if let Some(err) = last_err {
+        Err(err)
+    } else {
+        Err(anyhow!(
+            "notification retry loop exhausted without an error value"
+        ))
+    }
 }
 
 fn process_bootstrap_events<S>(

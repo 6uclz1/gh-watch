@@ -1,4 +1,7 @@
-use std::{env, fs, process::Command};
+use std::{
+    env, fs,
+    process::{Command, Output},
+};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -11,15 +14,27 @@ pub const DEFAULT_WINDOWS_APP_ID: &str =
 const POWERSHELL_BIN: &str = "powershell.exe";
 const POWERSHELL_HEALTHCHECK_SCRIPT: &str = "$null = $PSVersionTable.PSVersion";
 const POWERSHELL_TOAST_SCRIPT: &str = r#"
-[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;
-[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null;
-$appId = $env:GH_WATCH_TOAST_APP_ID;
-$title = [System.Security.SecurityElement]::Escape($env:GH_WATCH_TOAST_TITLE);
-$body = [System.Security.SecurityElement]::Escape($env:GH_WATCH_TOAST_BODY);
-$xml = New-Object Windows.Data.Xml.Dom.XmlDocument;
-$xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>$title</text><text>$body</text></binding></visual></toast>");
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml);
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast);
+$ErrorActionPreference = 'Stop';
+try {
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;
+    [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null;
+    $appId = $env:GH_WATCH_TOAST_APP_ID;
+    $title = [System.Security.SecurityElement]::Escape($env:GH_WATCH_TOAST_TITLE);
+    $body = [System.Security.SecurityElement]::Escape($env:GH_WATCH_TOAST_BODY);
+    $xml = New-Object Windows.Data.Xml.Dom.XmlDocument;
+    $xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>$title</text><text>$body</text></binding></visual></toast>");
+    $toast = [Windows.UI.Notifications.ToastNotification]::new($xml);
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast);
+    exit 0;
+}
+catch {
+    $message = $_.Exception.Message;
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        $message = $_ | Out-String;
+    }
+    [Console]::Error.WriteLine($message.Trim());
+    exit 1;
+}
 "#;
 
 pub fn effective_wsl_app_id(configured: Option<&str>) -> String {
@@ -122,19 +137,7 @@ fn ensure_powershell_available() -> Result<()> {
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        Err(anyhow!(
-            "{POWERSHELL_BIN} health check failed with status {}",
-            output.status
-        ))
-    } else {
-        Err(anyhow!(
-            "{POWERSHELL_BIN} health check failed with status {}: {}",
-            output.status,
-            stderr
-        ))
-    }
+    Err(format_powershell_failure("health check", &output))
 }
 
 fn notify_via_windows_toast(
@@ -162,18 +165,31 @@ fn notify_via_windows_toast(
         return Ok(());
     }
 
+    Err(format_powershell_failure("toast command", &output))
+}
+
+fn format_powershell_failure(operation: &str, output: &Output) -> anyhow::Error {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        Err(anyhow!(
-            "{POWERSHELL_BIN} toast command failed with status {}",
-            output.status
-        ))
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        Some(stderr)
+    } else if !stdout.is_empty() {
+        Some(stdout)
     } else {
-        Err(anyhow!(
-            "{POWERSHELL_BIN} toast command failed with status {}: {}",
+        None
+    };
+
+    if let Some(detail) = detail {
+        anyhow!(
+            "{POWERSHELL_BIN} {operation} failed with status {}: {}",
             output.status,
-            stderr
-        ))
+            detail
+        )
+    } else {
+        anyhow!(
+            "{POWERSHELL_BIN} {operation} failed with status {}",
+            output.status
+        )
     }
 }
 
@@ -272,6 +288,35 @@ exit 0
     }
 
     #[test]
+    fn check_health_in_wsl_reports_stdout_when_stderr_is_empty() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let script_path = write_stub_powershell(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+echo "health stdout detail"
+exit 1
+"#,
+        );
+        assert!(script_path.exists());
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let joined_path = join_path_front(dir.path(), &original_path);
+        let path_guard = EnvVarGuard::set("PATH", &joined_path);
+
+        let options = PlatformNotificationOptions::default();
+        let result = check_health_with_wsl_override(&options, true);
+
+        drop(path_guard);
+        let err = result.expect_err("health check should fail");
+        let message = err.to_string();
+        assert!(message.contains("health stdout detail"));
+    }
+
+    #[test]
     fn wsl_notify_uses_powershell_and_prefers_wsl_app_id() {
         let _guard = env_lock()
             .lock()
@@ -343,6 +388,74 @@ exit 23
 
         drop(path_guard);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn wsl_notify_reports_stdout_when_stderr_is_empty() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let script_path = write_stub_powershell(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+echo "toast API unavailable"
+exit 1
+"#,
+        );
+        assert!(script_path.exists());
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let joined_path = join_path_front(dir.path(), &original_path);
+        let path_guard = EnvVarGuard::set("PATH", &joined_path);
+
+        let options = PlatformNotificationOptions {
+            macos_bundle_id: None,
+            windows_app_id: None,
+            wsl_windows_app_id: None,
+        };
+        let result = notify_with_wsl_override("T", "B", &options, true);
+
+        drop(path_guard);
+        let err = result.expect_err("toast should fail");
+        let message = err.to_string();
+        assert!(message.contains("toast API unavailable"));
+    }
+
+    #[test]
+    fn wsl_notify_prefers_stderr_over_stdout() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let script_path = write_stub_powershell(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+echo "stdout detail"
+echo "stderr detail" >&2
+exit 1
+"#,
+        );
+        assert!(script_path.exists());
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let joined_path = join_path_front(dir.path(), &original_path);
+        let path_guard = EnvVarGuard::set("PATH", &joined_path);
+
+        let options = PlatformNotificationOptions {
+            macos_bundle_id: None,
+            windows_app_id: None,
+            wsl_windows_app_id: None,
+        };
+        let result = notify_with_wsl_override("T", "B", &options, true);
+
+        drop(path_guard);
+        let err = result.expect_err("toast should fail");
+        let message = err.to_string();
+        assert!(message.contains("stderr detail"));
+        assert!(!message.contains("stdout detail"));
     }
 
     fn write_stub_powershell(dir: &Path, script: &str) -> PathBuf {

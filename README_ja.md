@@ -11,7 +11,7 @@ English README: [README.md](README.md)
 1. 1つの設定で複数リポジトリを監視
 2. PR / Issue / コメント / レビュー / マージを通知
 3. SQLite の event key で再起動後も重複通知を防止
-4. 通知失敗時は再試行（at-least-once）
+4. 通知失敗時もタイムライン反映を優先し、同一poll内で1回再試行
 
 ## デモ
 
@@ -112,11 +112,13 @@ gh-watch watch
 - コメント/レビュー本文で自分がメンションされている
 - 自分が作成した PR / Issue への更新
 
-## at-least-once 通知セマンティクス
+## Timeline優先の通知セマンティクス
 
 - 初回はカーソル初期化のみ（通知なし）
-- `event_key` で重複通知を防止
-- 通知失敗時はカーソル巻き戻しで再試行
+- `event_key` を処理済みチェックポイントとして重複処理を防止
+- 通知送信は同一poll内で最大2回試行（初回 + 1回再試行）
+- 通知が最終的に失敗しても Timeline には反映し、処理完了扱いにする
+- 通知失敗時でもカーソルは巻き戻さず `now` へ進める
 - あるリポジトリの失敗が他リポジトリを止めない
 
 ## TUI キーバインド
@@ -163,6 +165,7 @@ gh-watch watch
   - Linuxデスクトップ通知ではなく `powershell.exe` 経由の Windows Toast を使用
   - `notifications.wsl_windows_app_id` を指定可能（WSL時は `notifications.windows_app_id` を参照しない）
   - 未指定時の既定値は PowerShell の AppUserModelID
+  - Toast 送信失敗時は `stderr` を優先し、`stderr` が空の場合は `stdout` を warning に含める
   - `powershell.exe` が利用できない場合:
     - `gh-watch check` は失敗終了
     - `gh-watch doctor` / `gh-watch watch` / `gh-watch once` は warning を表示して継続

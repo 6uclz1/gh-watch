@@ -11,7 +11,7 @@ Reliable GitHub watcher with desktop notifications and a terminal timeline UI.
 1. Watch multiple repositories from one config.
 2. Get notifications for PRs/issues/comments and review/merge events.
 3. Avoid duplicate alerts across restarts with SQLite-backed event keys.
-4. Keep resilience: failed notifications are retried (at-least-once behavior).
+4. Keep resilience: failed notifications are retried once per poll, while timeline reflection is prioritized.
 
 ## Demo
 
@@ -114,11 +114,13 @@ Global filter keys:
 - Comment/review body mentions you.
 - Update happens on a PR/Issue authored by you.
 
-## At-Least-Once Notification Semantics
+## Timeline-First Notification Semantics
 
 - First run bootstraps cursor and does not notify.
-- Notifications are deduplicated by `event_key`.
-- If notification delivery fails, cursor is rolled back to retry missed events.
+- Notifications are deduplicated by `event_key` (processing checkpoint).
+- Notification delivery is attempted up to 2 times within the same poll cycle.
+- Even if notification still fails, the event is reflected in Timeline and marked processed.
+- Cursor always advances to poll time (`now`) without rollback on notification failure.
 - Repository-level failures do not block other repositories.
 
 ## TUI Key Bindings
@@ -167,6 +169,7 @@ Use `config.example.toml` as a shareable template.
   - 通知は Linux デスクトップ通知ではなく `powershell.exe` 経由の Windows Toast を使用
   - `notifications.wsl_windows_app_id` を指定可能（WSL時は `notifications.windows_app_id` を参照しない）
   - 未指定時の既定値は PowerShell の AppUserModelID
+  - Toast 送信失敗時は `stderr` を優先し、`stderr` が空の場合は `stdout` を warning に含める
   - `powershell.exe` が利用できない場合:
     - `gh-watch check` は失敗終了
     - `gh-watch doctor` / `gh-watch watch` / `gh-watch once` は warning を表示して継続

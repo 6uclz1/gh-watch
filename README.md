@@ -78,6 +78,46 @@ gh-watch watch
 - `gh-watch init [--path <path>] [--force] [--reset-state]`
 - `gh-watch config open`
 - `gh-watch config path`
+- `gh-watch commands`
+- `gh-watch completion <shell>` (`bash` | `zsh` | `fish` | `pwsh`)
+
+## Shell Completion
+
+Generate completion scripts with:
+
+```bash
+gh-watch completion <shell>
+```
+
+zsh:
+
+```bash
+mkdir -p ~/.zfunc
+gh-watch completion zsh > ~/.zfunc/_gh-watch
+echo 'fpath=(~/.zfunc $fpath)' >> ~/.zshrc
+echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
+```
+
+bash:
+
+```bash
+gh-watch completion bash > ~/.gh-watch.bash
+echo 'source ~/.gh-watch.bash' >> ~/.bashrc
+```
+
+fish:
+
+```bash
+mkdir -p ~/.config/fish/completions
+gh-watch completion fish > ~/.config/fish/completions/gh-watch.fish
+```
+
+pwsh:
+
+```powershell
+gh-watch completion pwsh > "$HOME/.gh-watch.ps1"
+Add-Content -Path $PROFILE -Value '. "$HOME/.gh-watch.ps1"'
+```
 
 ### `once` Exit Codes
 

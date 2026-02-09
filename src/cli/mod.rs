@@ -62,5 +62,7 @@ pub async fn run() -> Result<()> {
             }
         }
         Commands::Config { command } => commands::config::run(command),
+        Commands::Guide => commands::guide::run(),
+        Commands::Completion { shell } => commands::completion::run(shell),
     }
 }

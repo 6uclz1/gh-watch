@@ -83,6 +83,8 @@ fn help_lists_minimal_commands_and_hides_removed_commands() {
         .stdout(predicate::str::contains("check"))
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("config"))
+        .stdout(predicate::str::contains("commands"))
+        .stdout(predicate::str::contains("completion"))
         .stdout(predicate::str::contains("report").not())
         .stdout(predicate::str::contains("doctor").not())
         .stdout(predicate::str::contains("notification-test").not());

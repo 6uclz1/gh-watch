@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -44,10 +44,25 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    #[command(name = "commands")]
+    Guide,
+    Completion {
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ConfigCommands {
     Open,
     Path,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    #[value(alias = "powershell")]
+    Pwsh,
 }

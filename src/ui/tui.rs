@@ -75,13 +75,6 @@ impl ActiveTab {
             Self::Repositories => 1,
         }
     }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Timeline => "Timeline",
-            Self::Repositories => "Repositories",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +82,12 @@ enum TimelineColumnMode {
     Full,
     Compact,
     TitleOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlyphMode {
+    Nerd,
+    Ascii,
 }
 
 #[derive(Debug, Clone)]
@@ -381,39 +380,12 @@ struct UiLayout {
 
 fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     let layout = ui_layout(frame.area());
-
-    let last_success = format_status_time(model.last_success_at);
-    let next_poll = format_status_time(model.next_poll_at);
-    let latest_failure = model
-        .latest_failure
-        .as_ref()
-        .map(summarize_failure)
-        .unwrap_or_else(|| "-".to_string());
-
+    let [status_primary, status_timing, status_failures] =
+        build_status_lines(model, Utc::now(), detect_glyph_mode_from_env());
     let header = Paragraph::new(vec![
-        Line::from(vec![Span::styled(
-            "gh-watch",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(format!(
-            "status={} | failures={} | tab={}",
-            model.status_line,
-            model.failure_count,
-            model.active_tab.label()
-        )),
-        Line::from(format!(
-            "watching={} | {}",
-            model.watched_repositories.len(),
-            summarize_watched_repositories(&model.watched_repositories)
-        )),
-        Line::from(build_loading_status_line(model, Utc::now())),
-        Line::from(format!(
-            "last_success={} | next_poll={}",
-            last_success, next_poll
-        )),
-        Line::from(format!("latest_failure={latest_failure}")),
+        Line::from(status_primary),
+        Line::from(status_timing),
+        Line::from(status_failures),
     ])
     .block(Block::default().borders(Borders::ALL).title("Status"));
     frame.render_widget(header, layout.status);
@@ -544,7 +516,7 @@ fn ui_layout(area: Rect) -> UiLayout {
     let vertical_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),
+            Constraint::Length(5),
             Constraint::Min(5),
             Constraint::Length(5),
             Constraint::Length(4),
@@ -735,28 +707,183 @@ fn truncate_tail(raw: &str, max_chars: usize) -> String {
     clipped
 }
 
-fn build_loading_status_line(model: &TuiModel, now: DateTime<Utc>) -> String {
-    if !model.is_polling {
-        return "loading=off | refresh=none".to_string();
+fn build_status_lines(model: &TuiModel, now: DateTime<Utc>, glyph_mode: GlyphMode) -> [String; 3] {
+    [
+        build_primary_status_line(model, now, glyph_mode),
+        build_timing_status_line(model, now, glyph_mode),
+        build_failure_status_line(model, glyph_mode),
+    ]
+}
+
+fn build_primary_status_line(
+    model: &TuiModel,
+    now: DateTime<Utc>,
+    glyph_mode: GlyphMode,
+) -> String {
+    let status = simplified_status_text(model);
+
+    if model.is_polling {
+        let elapsed_ms = elapsed_poll_millis(model.poll_started_at, now);
+        let spinner = spinner_frame(elapsed_ms, glyph_mode);
+        return match glyph_mode {
+            GlyphMode::Nerd => format!("󰚩 {spinner} {status}"),
+            GlyphMode::Ascii => format!("~ {spinner} {status}"),
+        };
     }
 
-    let elapsed_secs = model
-        .poll_started_at
-        .map(|started| (now - started).num_seconds().max(0))
-        .unwrap_or(0);
-    let spinner = spinner_frame(elapsed_secs);
+    let prefix = match glyph_mode {
+        GlyphMode::Nerd => {
+            if is_error_status(&model.status_line) {
+                "󰅚"
+            } else if is_quit_armed_status(&model.status_line) {
+                "󰈆"
+            } else {
+                "󰄬"
+            }
+        }
+        GlyphMode::Ascii => {
+            if is_error_status(&model.status_line) {
+                "!"
+            } else if is_quit_armed_status(&model.status_line) {
+                ">"
+            } else {
+                "+"
+            }
+        }
+    };
+
+    format!("{prefix} {status}")
+}
+
+fn build_timing_status_line(model: &TuiModel, now: DateTime<Utc>, glyph_mode: GlyphMode) -> String {
     let refresh = if model.queued_refresh {
         "queued"
     } else {
         "none"
     };
 
-    format!("loading=on {spinner} {elapsed_secs}s | refresh={refresh}")
+    if model.is_polling {
+        let elapsed_secs = model
+            .poll_started_at
+            .map(|started| (now - started).num_seconds().max(0))
+            .unwrap_or(0);
+        return match glyph_mode {
+            GlyphMode::Nerd => format!("󱑂 {elapsed_secs}s 󰏖 {refresh}"),
+            GlyphMode::Ascii => format!("time {elapsed_secs}s | refresh {refresh}"),
+        };
+    }
+
+    let next_poll = format_status_time(model.next_poll_at);
+    match glyph_mode {
+        GlyphMode::Nerd => format!("󱑆 {next_poll} 󰏖 {refresh}"),
+        GlyphMode::Ascii => format!("next {next_poll} | refresh {refresh}"),
+    }
 }
 
-fn spinner_frame(elapsed_secs: i64) -> char {
-    const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
-    FRAMES[(elapsed_secs.rem_euclid(FRAMES.len() as i64)) as usize]
+fn build_failure_status_line(model: &TuiModel, glyph_mode: GlyphMode) -> String {
+    if model.failure_count == 0 {
+        return match glyph_mode {
+            GlyphMode::Nerd => "󰄬 failures 0".to_string(),
+            GlyphMode::Ascii => "failures 0".to_string(),
+        };
+    }
+
+    let latest = model
+        .latest_failure
+        .as_ref()
+        .map(summarize_failure)
+        .unwrap_or_else(|| "-".to_string());
+    let clipped_latest = truncate_tail(&latest, 84);
+
+    match glyph_mode {
+        GlyphMode::Nerd => format!("󰅚 failures {} | {clipped_latest}", model.failure_count),
+        GlyphMode::Ascii => format!("failures {} | {clipped_latest}", model.failure_count),
+    }
+}
+
+fn simplified_status_text(model: &TuiModel) -> String {
+    if model.is_polling {
+        return "polling".to_string();
+    }
+
+    if is_quit_armed_status(&model.status_line) {
+        return "quit armed".to_string();
+    }
+
+    if is_error_status(&model.status_line) {
+        return model.status_line.clone();
+    }
+
+    "ready".to_string()
+}
+
+fn is_quit_armed_status(status: &str) -> bool {
+    status.starts_with("press Esc again")
+}
+
+fn is_error_status(status: &str) -> bool {
+    let lower = status.to_ascii_lowercase();
+    lower.contains("failed") || lower.contains("error")
+}
+
+fn elapsed_poll_millis(started_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> i64 {
+    started_at
+        .map(|started| (now - started).num_milliseconds().max(0))
+        .unwrap_or(0)
+}
+
+fn spinner_frame(elapsed_millis: i64, glyph_mode: GlyphMode) -> &'static str {
+    const FRAME_INTERVAL_MS: i64 = 120;
+
+    let frame_step = elapsed_millis.div_euclid(FRAME_INTERVAL_MS);
+    match glyph_mode {
+        GlyphMode::Nerd => {
+            const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            FRAMES[(frame_step.rem_euclid(FRAMES.len() as i64)) as usize]
+        }
+        GlyphMode::Ascii => {
+            const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+            FRAMES[(frame_step.rem_euclid(FRAMES.len() as i64)) as usize]
+        }
+    }
+}
+
+fn detect_glyph_mode_from_env() -> GlyphMode {
+    let term = std::env::var("TERM").ok();
+    let lc_all = std::env::var("LC_ALL").ok();
+    let lc_ctype = std::env::var("LC_CTYPE").ok();
+    let lang = std::env::var("LANG").ok();
+    detect_glyph_mode(
+        term.as_deref(),
+        lc_all.as_deref(),
+        lc_ctype.as_deref(),
+        lang.as_deref(),
+    )
+}
+
+fn detect_glyph_mode(
+    term: Option<&str>,
+    lc_all: Option<&str>,
+    lc_ctype: Option<&str>,
+    lang: Option<&str>,
+) -> GlyphMode {
+    if term.is_some_and(|value| value.eq_ignore_ascii_case("dumb")) {
+        return GlyphMode::Ascii;
+    }
+
+    let locale = lc_all
+        .filter(|value| !value.is_empty())
+        .or(lc_ctype.filter(|value| !value.is_empty()))
+        .or(lang.filter(|value| !value.is_empty()));
+
+    if let Some(locale) = locale {
+        let normalized = locale.to_ascii_uppercase();
+        if !normalized.contains("UTF-8") && !normalized.contains("UTF8") {
+            return GlyphMode::Ascii;
+        }
+    }
+
+    GlyphMode::Nerd
 }
 
 fn summarize_failure(failure: &FailureRecord) -> String {
@@ -772,18 +899,6 @@ fn summarize_failure(failure: &FailureRecord) -> String {
         failure.repo,
         clipped
     )
-}
-
-fn summarize_watched_repositories(repos: &[String]) -> String {
-    if repos.is_empty() {
-        return "none".to_string();
-    }
-
-    if repos.len() <= 2 {
-        return repos.join(", ");
-    }
-
-    format!("{}, {} +{}", repos[0], repos[1], repos.len() - 2)
 }
 
 fn timeline_inner_area(area: Rect) -> Rect {
@@ -860,8 +975,8 @@ mod tests {
     use chrono::TimeZone;
 
     use super::{
-        build_loading_status_line, timeline_column_mode, truncate_tail, unread_marker,
-        TimelineColumnMode, TuiModel,
+        build_status_lines, detect_glyph_mode, timeline_column_mode, truncate_tail, unread_marker,
+        GlyphMode, TimelineColumnMode, TuiModel,
     };
     use crate::domain::events::{EventKind, WatchEvent};
 
@@ -889,37 +1004,87 @@ mod tests {
     }
 
     #[test]
-    fn loading_status_line_reflects_queue_state() {
+    fn loading_status_lines_use_nerd_spinner_and_show_queued_while_polling() {
         let started_at = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-        let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 5).unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap()
+            + chrono::Duration::milliseconds(360);
 
         let mut model = TuiModel::new(10);
         model.is_polling = true;
         model.poll_started_at = Some(started_at);
         model.queued_refresh = true;
 
-        assert_eq!(
-            build_loading_status_line(&model, now),
-            "loading=on / 5s | refresh=queued"
-        );
+        let [line1, line2, line3] = build_status_lines(&model, now, GlyphMode::Nerd);
+        assert_eq!(line1, "󰚩 ⠸ polling");
+        assert_eq!(line2, "󱑂 0s 󰏖 queued");
+        assert_eq!(line3, "󰄬 failures 0");
     }
 
     #[test]
-    fn loading_status_line_advances_spinner_frame_while_polling() {
-        let started_at = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-        let now_a = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 5).unwrap();
-        let now_b = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 6).unwrap();
+    fn loading_status_lines_use_next_poll_when_not_polling() {
+        let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
 
         let mut model = TuiModel::new(10);
-        model.is_polling = true;
-        model.poll_started_at = Some(started_at);
+        model.is_polling = false;
+        model.next_poll_at = Some(chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 5, 0).unwrap());
+        model.status_line = "ok (new=2)".to_string();
 
-        let line_a = build_loading_status_line(&model, now_a);
-        let line_b = build_loading_status_line(&model, now_b);
+        let [line1, line2, _line3] = build_status_lines(&model, now, GlyphMode::Ascii);
+        assert_eq!(line1, "+ ready");
+        assert_eq!(line2, "next 2025-01-01 00:05:00Z | refresh none");
+    }
 
-        assert_ne!(line_a, line_b);
-        assert_eq!(line_a, "loading=on / 5s | refresh=none");
-        assert_eq!(line_b, "loading=on - 6s | refresh=none");
+    #[test]
+    fn loading_status_lines_show_error_detail_only_for_failure_states() {
+        let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+
+        let mut model = TuiModel::new(10);
+        model.status_line = "open failed: browser missing".to_string();
+        let [line_error, _, _] = build_status_lines(&model, now, GlyphMode::Ascii);
+        assert_eq!(line_error, "! open failed: browser missing");
+
+        model.status_line = "opened: https://example.com/x".to_string();
+        let [line_ok, _, _] = build_status_lines(&model, now, GlyphMode::Ascii);
+        assert_eq!(line_ok, "+ ready");
+    }
+
+    #[test]
+    fn loading_status_lines_show_quit_armed_label() {
+        let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let mut model = TuiModel::new(10);
+        model.status_line = "press Esc again to quit (1.5s)".to_string();
+
+        let [line1, _, _] = build_status_lines(&model, now, GlyphMode::Ascii);
+        assert_eq!(line1, "> quit armed");
+    }
+
+    #[test]
+    fn glyph_mode_uses_ascii_for_dumb_term() {
+        let mode = detect_glyph_mode(
+            Some("dumb"),
+            Some("en_US.UTF-8"),
+            Some("ja_JP.UTF-8"),
+            Some("en_US.UTF-8"),
+        );
+        assert_eq!(mode, GlyphMode::Ascii);
+    }
+
+    #[test]
+    fn glyph_mode_uses_ascii_for_non_utf8_locale() {
+        let mode = detect_glyph_mode(None, None, Some("C"), None);
+        assert_eq!(mode, GlyphMode::Ascii);
+    }
+
+    #[test]
+    fn glyph_mode_prioritizes_lc_all_over_lang() {
+        let mode = detect_glyph_mode(None, Some("C"), Some("ja_JP.UTF-8"), Some("en_US.UTF-8"));
+        assert_eq!(mode, GlyphMode::Ascii);
+    }
+
+    #[test]
+    fn glyph_mode_defaults_to_nerd_in_utf8_environment() {
+        let mode = detect_glyph_mode(None, None, Some("ja_JP.UTF-8"), None);
+        assert_eq!(mode, GlyphMode::Nerd);
     }
 
     #[test]

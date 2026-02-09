@@ -299,7 +299,7 @@ fn mouse_click_in_timeline_selects_row_using_offset() {
     let click = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 2,
-        row: 13,
+        row: 10,
         modifiers: KeyModifiers::NONE,
     };
 
@@ -333,7 +333,7 @@ fn mouse_click_outside_timeline_returns_none() {
     let click = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 95,
-        row: 10,
+        row: 4,
         modifiers: KeyModifiers::NONE,
     };
 

@@ -41,6 +41,7 @@ name = "octocat/hello-world"
     assert!(cfg.notifications.include_url);
     assert!(cfg.notifications.macos_bundle_id.is_none());
     assert!(cfg.notifications.windows_app_id.is_none());
+    assert!(cfg.notifications.wsl_windows_app_id.is_none());
     assert!(cfg.filters.event_kinds.is_empty());
     assert!(cfg.filters.ignore_actors.is_empty());
     assert!(!cfg.filters.only_involving_me);
@@ -56,6 +57,7 @@ enabled = true
 include_url = true
 macos_bundle_id = "com.example.CustomMacApp"
 windows_app_id = "com.example.CustomWinApp"
+wsl_windows_app_id = "com.example.CustomWslApp"
 
 [[repositories]]
 name = "octocat/hello-world"
@@ -69,6 +71,10 @@ name = "octocat/hello-world"
     assert_eq!(
         cfg.notifications.windows_app_id.as_deref(),
         Some("com.example.CustomWinApp")
+    );
+    assert_eq!(
+        cfg.notifications.wsl_windows_app_id.as_deref(),
+        Some("com.example.CustomWslApp")
     );
 }
 

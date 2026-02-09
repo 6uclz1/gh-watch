@@ -150,6 +150,24 @@ gh-watch watch
 
 共有用テンプレートは `config.example.toml` を利用してください。
 
+## 通知 Sender ID
+
+- macOS:
+  - `notifications.macos_bundle_id` を指定可能（未指定時の既定値: `com.apple.Terminal`）
+  - 未指定時は `check` / `watch` 起動時に警告を表示
+- Windows:
+  - `notifications.windows_app_id` を指定可能
+  - 未指定時の既定値は PowerShell の AppUserModelID（`Toast::POWERSHELL_APP_ID`）
+  - 未指定時は `check` / `watch` 起動時に警告を表示
+- WSL（LinuxバイナリをWSL上で実行する場合）:
+  - Linuxデスクトップ通知ではなく `powershell.exe` 経由の Windows Toast を使用
+  - `notifications.wsl_windows_app_id` を指定可能（WSL時は `notifications.windows_app_id` を参照しない）
+  - 未指定時の既定値は PowerShell の AppUserModelID
+  - `powershell.exe` が利用できない場合:
+    - `gh-watch check` は失敗終了
+    - `gh-watch doctor` / `gh-watch watch` / `gh-watch once` は warning を表示して継続
+- 最終的なバナー表示有無は OS 側の通知設定に依存
+
 ## 開発時の品質ゲート
 
 - `cargo fmt --check`

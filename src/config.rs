@@ -89,6 +89,8 @@ pub struct NotificationConfig {
     pub macos_bundle_id: Option<String>,
     #[serde(default)]
     pub windows_app_id: Option<String>,
+    #[serde(default)]
+    pub wsl_windows_app_id: Option<String>,
 }
 
 impl Default for NotificationConfig {
@@ -98,6 +100,7 @@ impl Default for NotificationConfig {
             include_url: true,
             macos_bundle_id: None,
             windows_app_id: None,
+            wsl_windows_app_id: None,
         }
     }
 }

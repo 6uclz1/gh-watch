@@ -87,6 +87,7 @@ exit 1
             include_url: true,
             macos_bundle_id: None,
             windows_app_id: None,
+            wsl_windows_app_id: None,
         },
         filters: FiltersConfig::default(),
         poll: PollConfig {

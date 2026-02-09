@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use serde::Deserialize;
 
 use crate::{
     config::{default_state_db_path, parse_config, resolve_config_path_with_source, Config},
@@ -30,14 +31,41 @@ pub(crate) fn resolve_state_db_path_for_reset(config_path: Option<&Path>) -> Res
             resolved.path.display()
         )
     })?;
-    let cfg = parse_config(&src).with_context(|| {
+    let state_db_path = parse_state_db_path_for_reset(&src).with_context(|| {
         format!(
             "failed to parse config for --reset-state: {}",
             resolved.path.display()
         )
     })?;
 
-    resolve_state_db_path(&cfg)
+    match state_db_path {
+        Some(path) => Ok(path),
+        None => default_state_db_path(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetStateConfigCompat {
+    state_db_path: Option<String>,
+}
+
+fn parse_state_db_path_for_reset(src: &str) -> Result<Option<PathBuf>> {
+    match parse_config(src) {
+        Ok(cfg) => Ok(cfg.state_db_path.map(PathBuf::from)),
+        Err(err) if is_unknown_field_error(&err) => {
+            let cfg: ResetStateConfigCompat =
+                toml::from_str(src).context("failed to parse config TOML")?;
+            Ok(cfg.state_db_path.map(PathBuf::from))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn is_unknown_field_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let msg = cause.to_string();
+        msg.contains("unknown field `")
+    })
 }
 
 pub(crate) fn remove_state_db_files(path: &Path) -> Result<()> {

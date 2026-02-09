@@ -146,6 +146,40 @@ name = "acme/api"
 }
 
 #[test]
+fn init_reset_state_accepts_removed_failure_history_limit_key() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let state_db = dir.path().join("state.db");
+    let escaped = state_db.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+interval_seconds = 300
+failure_history_limit = 200
+state_db_path = "{escaped}"
+
+[[repositories]]
+name = "acme/api"
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = cargo_bin_cmd!("gh-watch");
+    cmd.arg("init")
+        .arg("--reset-state")
+        .arg("--path")
+        .arg(&config_path)
+        .assert()
+        .success()
+        .stdout(contains("reset state db:"))
+        .stdout(contains(state_db.display().to_string()));
+
+    assert!(state_db.exists());
+}
+
+#[test]
 fn init_reset_state_uses_default_state_db_when_config_is_missing() {
     let dir = tempdir().unwrap();
     let missing_config = dir.path().join("missing.toml");

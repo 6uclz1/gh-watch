@@ -15,26 +15,15 @@ use crate::{
 const NON_MACOS_NOOP_WARNING: &str =
     "desktop notifications are supported on macOS and WSL only; using noop notifier";
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-const WSL_POWERSHELL_UNAVAILABLE_WARNING: &str =
-    "WSL detected but powershell.exe is unavailable; using noop notifier";
-
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-const WSL_BALLOON_TITLE_MAX_CHARS: usize = 63;
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-const WSL_BALLOON_BODY_MAX_CHARS: usize = 255;
+const WSL_BURNTTOAST_UNAVAILABLE_WARNING: &str =
+    "WSL detected but BurntToast is unavailable via powershell.exe; using noop notifier";
 
 #[cfg(target_os = "linux")]
-const WSL_NOTIFY_POWERSHELL_SCRIPT: &str = r#"
-[void][reflection.assembly]::LoadWithPartialName('System.Windows.Forms')
-[void][reflection.assembly]::LoadWithPartialName('System.Drawing')
+const WSL_NOTIFY_BURNTTOAST_SCRIPT: &str = r#"
+Import-Module BurntToast -ErrorAction Stop
 $title = $env:GH_WATCH_NOTIFY_TITLE
 $body = $env:GH_WATCH_NOTIFY_BODY
-$notify = New-Object System.Windows.Forms.NotifyIcon
-$notify.Icon = [System.Drawing.SystemIcons]::Information
-$notify.Visible = $true
-$notify.ShowBalloonTip(10000, $title, $body, [System.Windows.Forms.ToolTipIcon]::Info)
-Start-Sleep -Milliseconds 10500
-$notify.Dispose()
+New-BurntToastNotification -Text $title, $body | Out-Null
 "#;
 
 pub fn build_notification_body(event: &WatchEvent, include_url: bool) -> String {
@@ -59,30 +48,11 @@ fn dispatch_result(include_url: bool, click_action: bool) -> NotificationDispatc
     }
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-fn sanitize_wsl_balloon_text(raw: &str, max_chars: usize) -> String {
-    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    let normalized_len = normalized.chars().count();
-
-    if normalized_len <= max_chars {
-        return normalized;
-    }
-    if max_chars == 0 {
-        return String::new();
-    }
-    if max_chars <= 3 {
-        return ".".repeat(max_chars);
-    }
-
-    let head = normalized.chars().take(max_chars - 3).collect::<String>();
-    format!("{head}...")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum DesktopBackendKind {
     MacOs,
-    WslPowerShell,
+    WslBurntToast,
     Noop,
 }
 
@@ -157,14 +127,14 @@ impl NotifierPort for DesktopNotifier {
                     Ok(())
                 }
             }
-            DesktopBackendKind::WslPowerShell => Ok(()),
+            DesktopBackendKind::WslBurntToast => Ok(()),
             DesktopBackendKind::Noop => Ok(()),
         }
     }
 
     fn click_action_support(&self) -> NotificationClickSupport {
         match self.backend {
-            DesktopBackendKind::WslPowerShell
+            DesktopBackendKind::WslBurntToast
             | DesktopBackendKind::MacOs
             | DesktopBackendKind::Noop => NotificationClickSupport::Unsupported,
         }
@@ -188,10 +158,10 @@ impl NotifierPort for DesktopNotifier {
                     Ok(dispatch_result(include_url, false))
                 }
             }
-            DesktopBackendKind::WslPowerShell => {
+            DesktopBackendKind::WslBurntToast => {
                 #[cfg(target_os = "linux")]
                 {
-                    notify_via_powershell(&title, &body)?;
+                    notify_via_burnttoast(&title, &body)?;
                     Ok(dispatch_result(include_url, false))
                 }
 
@@ -245,7 +215,7 @@ fn is_wsl_from_inputs(
 }
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-fn select_linux_backend(is_wsl: bool, powershell_ok: bool) -> LinuxBackendSelection {
+fn select_linux_backend(is_wsl: bool, burnttoast_ok: bool) -> LinuxBackendSelection {
     if !is_wsl {
         return LinuxBackendSelection {
             kind: DesktopBackendKind::Noop,
@@ -253,15 +223,15 @@ fn select_linux_backend(is_wsl: bool, powershell_ok: bool) -> LinuxBackendSelect
         };
     }
 
-    if powershell_ok {
+    if burnttoast_ok {
         LinuxBackendSelection {
-            kind: DesktopBackendKind::WslPowerShell,
+            kind: DesktopBackendKind::WslBurntToast,
             startup_warning: None,
         }
     } else {
         LinuxBackendSelection {
             kind: DesktopBackendKind::Noop,
-            startup_warning: Some(WSL_POWERSHELL_UNAVAILABLE_WARNING.to_string()),
+            startup_warning: Some(WSL_BURNTTOAST_UNAVAILABLE_WARNING.to_string()),
         }
     }
 }
@@ -276,12 +246,12 @@ fn detect_linux_backend() -> LinuxBackendSelection {
         interop.as_deref(),
         proc_hint.as_deref(),
     );
-    let powershell_ok = if is_wsl {
-        probe_powershell_available()
+    let burnttoast_ok = if is_wsl {
+        probe_burnttoast_available()
     } else {
         false
     };
-    select_linux_backend(is_wsl, powershell_ok)
+    select_linux_backend(is_wsl, burnttoast_ok)
 }
 
 #[cfg(target_os = "linux")]
@@ -297,13 +267,13 @@ fn read_proc_wsl_hint() -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn probe_powershell_available() -> bool {
+fn probe_burnttoast_available() -> bool {
     let output = Command::new("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "Write-Output ok",
+            "Import-Module BurntToast -ErrorAction Stop; Get-Command New-BurntToastNotification -ErrorAction Stop | Out-Null; Write-Output ok",
         ])
         .output();
     matches!(output, Ok(out) if out.status.success())
@@ -356,15 +326,13 @@ fn notify_via_osascript(title: &str, body: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn notify_via_powershell(title: &str, body: &str) -> Result<()> {
-    let title = sanitize_wsl_balloon_text(title, WSL_BALLOON_TITLE_MAX_CHARS);
-    let body = sanitize_wsl_balloon_text(body, WSL_BALLOON_BODY_MAX_CHARS);
+fn notify_via_burnttoast(title: &str, body: &str) -> Result<()> {
     let output = Command::new("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            WSL_NOTIFY_POWERSHELL_SCRIPT,
+            WSL_NOTIFY_BURNTTOAST_SCRIPT,
         ])
         .env("GH_WATCH_NOTIFY_TITLE", title)
         .env("GH_WATCH_NOTIFY_BODY", body)
@@ -415,8 +383,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::{
-        build_notification_body, is_wsl_from_inputs, sanitize_wsl_balloon_text,
-        select_linux_backend, DesktopBackendKind, DesktopNotifier,
+        build_notification_body, is_wsl_from_inputs, select_linux_backend, DesktopBackendKind,
+        DesktopNotifier,
     };
     #[cfg(target_os = "macos")]
     use crate::config::NotificationConfig;
@@ -490,57 +458,30 @@ mod tests {
     }
 
     #[test]
-    fn linux_backend_wsl_with_powershell_selects_wsl_backend() {
+    fn linux_backend_wsl_with_burnttoast_selects_wsl_backend() {
         let selected = select_linux_backend(true, true);
-        assert_eq!(selected.kind, DesktopBackendKind::WslPowerShell);
+        assert_eq!(selected.kind, DesktopBackendKind::WslBurntToast);
         assert!(selected.startup_warning.is_none());
     }
 
     #[test]
-    fn linux_backend_wsl_without_powershell_falls_back_to_noop_with_warning() {
+    fn linux_backend_wsl_without_burnttoast_falls_back_to_noop_with_warning() {
         let selected = select_linux_backend(true, false);
         assert_eq!(selected.kind, DesktopBackendKind::Noop);
         let warning = selected.startup_warning.expect("warning should exist");
-        assert!(warning.contains("powershell.exe"));
+        assert!(warning.contains("BurntToast"));
     }
 
     #[test]
     fn wsl_click_action_support_is_unsupported() {
         let notifier = DesktopNotifier {
-            backend: DesktopBackendKind::WslPowerShell,
+            backend: DesktopBackendKind::WslBurntToast,
             startup_warnings: Vec::new(),
         };
 
         assert_eq!(
             notifier.click_action_support(),
             NotificationClickSupport::Unsupported
-        );
-    }
-
-    #[test]
-    fn sanitize_wsl_balloon_text_normalizes_whitespace() {
-        let normalized = sanitize_wsl_balloon_text("line1\n  line2\t\tline3\r\nline4", 255);
-        assert_eq!(normalized, "line1 line2 line3 line4");
-    }
-
-    #[test]
-    fn sanitize_wsl_balloon_text_truncates_with_ellipsis() {
-        let title = sanitize_wsl_balloon_text(
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!?",
-            63,
-        );
-        assert_eq!(
-            title,
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567..."
-        );
-
-        let body = sanitize_wsl_balloon_text(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            255,
-        );
-        assert_eq!(
-            body,
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..."
         );
     }
 

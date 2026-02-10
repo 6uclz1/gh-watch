@@ -197,7 +197,7 @@ Add-Content -Path $PROFILE -Value '. "$HOME/.gh-watch.ps1"'
 ## 通知バックエンド
 
 - macOS: `osascript`（`display notification`）で通知
-- WSL: `powershell.exe` + WinForms `NotifyIcon.ShowBalloonTip(10000)` で通知
+- WSL: `powershell.exe` + BurntToast（`New-BurntToastNotification`）で通知
 - WSLでは通知クリックでURL起動は非対応（`include_url = true` の場合は通知本文にURLを表示）
 - それ以外の環境: 通知は Noop（起動時に warning を表示）
 - 最終的なバナー表示有無は OS 側の通知設定やフォーカスモードに依存

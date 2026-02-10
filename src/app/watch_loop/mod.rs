@@ -7,7 +7,7 @@ use tokio::time::MissedTickBehavior;
 use crate::{
     app::poll_once::{poll_once, PollOutcome},
     config::Config,
-    ports::{ClockPort, GhClientPort, NotifierPort, StateStorePort},
+    ports::{ClockPort, GhClientPort, NotifierPort, WatchStatePort},
     ui::tui::{TerminalUi, TuiModel},
 };
 
@@ -34,7 +34,7 @@ pub async fn run_watch<C, S, N, K>(
 ) -> Result<()>
 where
     C: GhClientPort,
-    S: StateStorePort,
+    S: WatchStatePort,
     N: NotifierPort,
     K: ClockPort,
 {

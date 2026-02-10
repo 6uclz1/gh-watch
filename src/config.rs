@@ -111,8 +111,8 @@ pub struct FiltersConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PollConfig {
-    #[serde(default = "default_poll_max_concurrency")]
-    pub max_concurrency: usize,
+    #[serde(default)]
+    pub max_concurrency: Option<usize>,
     #[serde(default = "default_poll_timeout_seconds")]
     pub timeout_seconds: u64,
 }
@@ -120,7 +120,7 @@ pub struct PollConfig {
 impl Default for PollConfig {
     fn default() -> Self {
         Self {
-            max_concurrency: default_poll_max_concurrency(),
+            max_concurrency: None,
             timeout_seconds: default_poll_timeout_seconds(),
         }
     }
@@ -144,10 +144,6 @@ fn default_retention_days() -> u32 {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_poll_max_concurrency() -> usize {
-    1
 }
 
 fn default_poll_timeout_seconds() -> u64 {
@@ -313,10 +309,6 @@ fn validate_config(cfg: &Config) -> Result<()> {
         return Err(anyhow!("timeline_limit must be >= 1"));
     }
 
-    if cfg.poll.max_concurrency == 0 {
-        return Err(anyhow!("poll.max_concurrency must be >= 1"));
-    }
-
     if cfg.poll.timeout_seconds == 0 {
         return Err(anyhow!("poll.timeout_seconds must be >= 1"));
     }
@@ -334,10 +326,9 @@ pub fn stability_warnings(cfg: &Config) -> Vec<String> {
         ));
     }
 
-    if cfg.poll.max_concurrency > 1 {
+    if let Some(configured) = cfg.poll.max_concurrency {
         warnings.push(format!(
-            "stability warning: poll.max_concurrency={} is ignored because repository polling is forced sequential",
-            cfg.poll.max_concurrency
+            "stability warning: poll.max_concurrency is deprecated and ignored (configured={configured}); repository polling is forced sequential"
         ));
     }
 

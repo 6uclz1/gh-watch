@@ -200,7 +200,7 @@ Add-Content -Path $PROFILE -Value '. "$HOME/.gh-watch.ps1"'
 ポーリング安定性に関する注意:
 
 - `interval_seconds < 30` は許容されますが、起動時に安定性警告を表示します。
-- `poll.max_concurrency` は互換性のため残っていますが、実行時は逐次取得に固定されます。
+- `poll.max_concurrency` は後方互換のため受理されますが、非推奨かつ無視されます（実行時は逐次取得に固定）。
 
 ## 通知バックエンド
 

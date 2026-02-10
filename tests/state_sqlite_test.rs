@@ -1,7 +1,10 @@
 use chrono::{Duration, TimeZone, Utc};
 use gh_watch::domain::events::{EventKind, WatchEvent};
 use gh_watch::infra::state_sqlite::{SqliteStateStore, StateSchemaMismatchError};
-use gh_watch::ports::{RepoPersistBatch, StateStorePort};
+use gh_watch::ports::{
+    CursorPort, RepoBatchPort, RepoPersistBatch, RetentionPort, TimelineQueryPort,
+    TimelineReadMarkPort,
+};
 use rusqlite::params;
 use tempfile::tempdir;
 

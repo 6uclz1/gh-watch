@@ -25,15 +25,35 @@ pub struct PersistBatchResult {
     pub newly_logged_event_keys: Vec<String>,
 }
 
-pub trait StateStorePort: Send + Sync {
+pub trait CursorPort: Send + Sync {
     fn get_cursor(&self, repo: &str) -> Result<Option<DateTime<Utc>>>;
     fn set_cursor(&self, repo: &str, at: DateTime<Utc>) -> Result<()>;
+}
+
+pub trait TimelineQueryPort: Send + Sync {
     fn load_timeline_events(&self, limit: usize) -> Result<Vec<WatchEvent>>;
-    fn mark_timeline_event_read(&self, event_key: &str, read_at: DateTime<Utc>) -> Result<()>;
     fn load_read_event_keys(&self, event_keys: &[String]) -> Result<HashSet<String>>;
+}
+
+pub trait TimelineReadMarkPort: Send + Sync {
+    fn mark_timeline_event_read(&self, event_key: &str, read_at: DateTime<Utc>) -> Result<()>;
+}
+
+pub trait RetentionPort: Send + Sync {
     fn cleanup_old(&self, retention_days: u32, now: DateTime<Utc>) -> Result<()>;
+}
+
+pub trait RepoBatchPort: Send + Sync {
     fn persist_repo_batch(&self, batch: &RepoPersistBatch) -> Result<PersistBatchResult>;
 }
+
+pub trait PollStatePort: CursorPort + RetentionPort + RepoBatchPort {}
+
+impl<T> PollStatePort for T where T: CursorPort + RetentionPort + RepoBatchPort {}
+
+pub trait WatchStatePort: PollStatePort + TimelineQueryPort + TimelineReadMarkPort {}
+
+impl<T> WatchStatePort for T where T: PollStatePort + TimelineQueryPort + TimelineReadMarkPort {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationClickSupport {

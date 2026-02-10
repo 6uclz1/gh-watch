@@ -3,7 +3,7 @@ use crossterm::event::Event;
 use ratatui::layout::Rect;
 
 use crate::{
-    ports::{ClockPort, StateStorePort},
+    ports::{ClockPort, TimelineReadMarkPort},
     ui::tui::{handle_input, parse_input, parse_mouse_input, ActiveTab, InputCommand, TuiModel},
 };
 
@@ -26,7 +26,7 @@ pub(super) fn handle_stream_event<S, K>(
     open_url: &dyn Fn(&str) -> Result<()>,
 ) -> LoopControl
 where
-    S: StateStorePort,
+    S: TimelineReadMarkPort,
     K: ClockPort,
 {
     match maybe_event {
@@ -123,7 +123,7 @@ where
 
 pub(super) fn mark_selected_event_read<S, K>(model: &mut TuiModel, state: &S, clock: &K)
 where
-    S: StateStorePort,
+    S: TimelineReadMarkPort,
     K: ClockPort,
 {
     let Some(event_key) = model

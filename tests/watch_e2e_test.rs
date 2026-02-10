@@ -87,7 +87,7 @@ exit 1
         },
         filters: FiltersConfig::default(),
         poll: PollConfig {
-            max_concurrency: 4,
+            max_concurrency: Some(4),
             timeout_seconds: 30,
         },
     };

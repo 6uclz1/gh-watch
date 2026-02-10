@@ -204,7 +204,7 @@ Notification config keys:
 Polling reliability notes:
 
 - `interval_seconds < 30` is allowed but prints a stability warning at startup.
-- `poll.max_concurrency` remains configurable for compatibility, but fetch execution is forced sequential.
+- `poll.max_concurrency` is accepted for backward compatibility, but it is deprecated and ignored (fetch execution is forced sequential).
 
 ## Notification Backend
 

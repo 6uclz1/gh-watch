@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
@@ -11,7 +9,10 @@ use crate::{
     },
     config::{Config, ResolvedConfigPath},
     infra::{gh_client::GhCliClient, notifier::DesktopNotifier},
-    ports::{GhClientPort, NotifierPort, PersistBatchResult, RepoPersistBatch, StateStorePort},
+    ports::{
+        CursorPort, GhClientPort, NotifierPort, PersistBatchResult, RepoBatchPort,
+        RepoPersistBatch, RetentionPort,
+    },
 };
 
 struct DryRunStateStore<'a, S> {
@@ -24,9 +25,9 @@ impl<'a, S> DryRunStateStore<'a, S> {
     }
 }
 
-impl<S> StateStorePort for DryRunStateStore<'_, S>
+impl<S> CursorPort for DryRunStateStore<'_, S>
 where
-    S: StateStorePort,
+    S: CursorPort,
 {
     fn get_cursor(&self, repo: &str) -> Result<Option<DateTime<Utc>>> {
         self.inner.get_cursor(repo)
@@ -35,23 +36,21 @@ where
     fn set_cursor(&self, _repo: &str, _at: DateTime<Utc>) -> Result<()> {
         Ok(())
     }
+}
 
-    fn load_timeline_events(&self, limit: usize) -> Result<Vec<crate::domain::events::WatchEvent>> {
-        self.inner.load_timeline_events(limit)
-    }
-
-    fn mark_timeline_event_read(&self, _event_key: &str, _read_at: DateTime<Utc>) -> Result<()> {
-        Ok(())
-    }
-
-    fn load_read_event_keys(&self, event_keys: &[String]) -> Result<HashSet<String>> {
-        self.inner.load_read_event_keys(event_keys)
-    }
-
+impl<S> RetentionPort for DryRunStateStore<'_, S>
+where
+    S: Sync,
+{
     fn cleanup_old(&self, _retention_days: u32, _now: DateTime<Utc>) -> Result<()> {
         Ok(())
     }
+}
 
+impl<S> RepoBatchPort for DryRunStateStore<'_, S>
+where
+    S: Sync,
+{
     fn persist_repo_batch(&self, _batch: &RepoPersistBatch) -> Result<PersistBatchResult> {
         Ok(PersistBatchResult::default())
     }

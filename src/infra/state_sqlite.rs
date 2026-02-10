@@ -6,7 +6,10 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 
 use crate::{
     domain::events::WatchEvent,
-    ports::{PersistBatchResult, RepoPersistBatch, StateStorePort},
+    ports::{
+        CursorPort, PersistBatchResult, RepoBatchPort, RepoPersistBatch, RetentionPort,
+        TimelineQueryPort, TimelineReadMarkPort,
+    },
 };
 
 const SCHEMA_VERSION: &str = "3";
@@ -172,7 +175,7 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value
     }
 }
 
-impl StateStorePort for SqliteStateStore {
+impl CursorPort for SqliteStateStore {
     fn get_cursor(&self, repo: &str) -> Result<Option<DateTime<Utc>>> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let value: Option<String> = conn
@@ -201,7 +204,9 @@ ON CONFLICT(repo) DO UPDATE SET last_polled_at = excluded.last_polled_at
         )?;
         Ok(())
     }
+}
 
+impl TimelineQueryPort for SqliteStateStore {
     fn load_timeline_events(&self, limit: usize) -> Result<Vec<WatchEvent>> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut stmt = conn.prepare(
@@ -216,19 +221,6 @@ LIMIT ?1
         let rows = stmt.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
         rows.map(|row| Self::parse_watch_event_payload(row?))
             .collect::<Result<Vec<_>>>()
-    }
-
-    fn mark_timeline_event_read(&self, event_key: &str, read_at: DateTime<Utc>) -> Result<()> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        conn.execute(
-            "
-UPDATE event_log_v2
-SET read_at = COALESCE(read_at, ?2)
-WHERE event_key = ?1
-",
-            params![event_key, read_at.to_rfc3339()],
-        )?;
-        Ok(())
     }
 
     fn load_read_event_keys(&self, event_keys: &[String]) -> Result<HashSet<String>> {
@@ -257,7 +249,24 @@ WHERE read_at IS NOT NULL
         }
         Ok(read_keys)
     }
+}
 
+impl TimelineReadMarkPort for SqliteStateStore {
+    fn mark_timeline_event_read(&self, event_key: &str, read_at: DateTime<Utc>) -> Result<()> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        conn.execute(
+            "
+UPDATE event_log_v2
+SET read_at = COALESCE(read_at, ?2)
+WHERE event_key = ?1
+",
+            params![event_key, read_at.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+}
+
+impl RetentionPort for SqliteStateStore {
     fn cleanup_old(&self, retention_days: u32, now: DateTime<Utc>) -> Result<()> {
         let cutoff = now - Duration::days(retention_days as i64);
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
@@ -267,7 +276,9 @@ WHERE read_at IS NOT NULL
         )?;
         Ok(())
     }
+}
 
+impl RepoBatchPort for SqliteStateStore {
     fn persist_repo_batch(&self, batch: &RepoPersistBatch) -> Result<PersistBatchResult> {
         let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
         let tx = conn.transaction()?;

@@ -12,8 +12,8 @@ use gh_watch::{
     config::{Config, FiltersConfig, NotificationConfig, PollConfig, RepositoryConfig},
     domain::events::{EventKind, WatchEvent},
     ports::{
-        ClockPort, GhClientPort, NotificationClickSupport, NotificationDispatchResult,
-        NotifierPort, PersistBatchResult, RepoPersistBatch, StateStorePort,
+        ClockPort, CursorPort, GhClientPort, NotificationClickSupport, NotificationDispatchResult,
+        NotifierPort, PersistBatchResult, RepoBatchPort, RepoPersistBatch, RetentionPort,
     },
 };
 
@@ -196,7 +196,7 @@ impl FakeState {
     }
 }
 
-impl StateStorePort for FakeState {
+impl CursorPort for FakeState {
     fn get_cursor(&self, repo: &str) -> Result<Option<chrono::DateTime<Utc>>> {
         if self.fail_get_cursor.lock().unwrap().contains(repo) {
             return Err(anyhow!("cursor read failed for {repo}"));
@@ -208,23 +208,9 @@ impl StateStorePort for FakeState {
         self.cursors.lock().unwrap().insert(repo.to_string(), at);
         Ok(())
     }
+}
 
-    fn load_timeline_events(&self, _limit: usize) -> Result<Vec<WatchEvent>> {
-        Ok(Vec::new())
-    }
-
-    fn mark_timeline_event_read(
-        &self,
-        _event_key: &str,
-        _read_at: chrono::DateTime<Utc>,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    fn load_read_event_keys(&self, _event_keys: &[String]) -> Result<HashSet<String>> {
-        Ok(HashSet::new())
-    }
-
+impl RetentionPort for FakeState {
     fn cleanup_old(&self, retention_days: u32, now: chrono::DateTime<Utc>) -> Result<()> {
         self.cleanup_calls
             .lock()
@@ -232,7 +218,9 @@ impl StateStorePort for FakeState {
             .push((retention_days, now));
         Ok(())
     }
+}
 
+impl RepoBatchPort for FakeState {
     fn persist_repo_batch(&self, batch: &RepoPersistBatch) -> Result<PersistBatchResult> {
         if self
             .fail_persist_repo
@@ -330,7 +318,7 @@ fn cfg() -> Config {
         },
         filters: FiltersConfig::default(),
         poll: PollConfig {
-            max_concurrency: 4,
+            max_concurrency: Some(4),
             timeout_seconds: 30,
         },
     }
@@ -526,7 +514,7 @@ async fn repo_fetch_runs_sequentially_even_when_config_concurrency_is_high() {
         now: Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
     };
     let mut local_cfg = cfg();
-    local_cfg.poll.max_concurrency = 8;
+    local_cfg.poll.max_concurrency = Some(8);
 
     state.set_cursor(
         "acme/api",

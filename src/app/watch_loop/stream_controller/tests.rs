@@ -1,7 +1,4 @@
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use chrono::{TimeZone, Utc};
@@ -13,7 +10,7 @@ use ratatui::layout::Rect;
 use super::{handle_stream_event, LoopControl};
 use crate::{
     domain::events::{EventKind, WatchEvent},
-    ports::{ClockPort, PersistBatchResult, RepoPersistBatch, StateStorePort},
+    ports::{ClockPort, TimelineReadMarkPort},
     ui::tui::TuiModel,
 };
 
@@ -33,19 +30,7 @@ impl FakeState {
     }
 }
 
-impl StateStorePort for FakeState {
-    fn get_cursor(&self, _repo: &str) -> Result<Option<chrono::DateTime<Utc>>> {
-        Ok(None)
-    }
-
-    fn set_cursor(&self, _repo: &str, _at: chrono::DateTime<Utc>) -> Result<()> {
-        Ok(())
-    }
-
-    fn load_timeline_events(&self, _limit: usize) -> Result<Vec<WatchEvent>> {
-        Ok(Vec::new())
-    }
-
+impl TimelineReadMarkPort for FakeState {
     fn mark_timeline_event_read(
         &self,
         event_key: &str,
@@ -59,29 +44,6 @@ impl StateStorePort for FakeState {
             .unwrap()
             .push(event_key.to_string());
         Ok(())
-    }
-
-    fn load_read_event_keys(&self, event_keys: &[String]) -> Result<HashSet<String>> {
-        let existing = self
-            .marked_read_event_keys
-            .lock()
-            .unwrap()
-            .clone()
-            .into_iter()
-            .collect::<HashSet<_>>();
-        Ok(event_keys
-            .iter()
-            .filter(|key| existing.contains(*key))
-            .cloned()
-            .collect())
-    }
-
-    fn cleanup_old(&self, _retention_days: u32, _now: chrono::DateTime<Utc>) -> Result<()> {
-        Ok(())
-    }
-
-    fn persist_repo_batch(&self, _batch: &RepoPersistBatch) -> Result<PersistBatchResult> {
-        Ok(PersistBatchResult::default())
     }
 }
 

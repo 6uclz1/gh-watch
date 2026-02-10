@@ -42,7 +42,7 @@ name = "octocat/hello-world"
     assert!(cfg.filters.event_kinds.is_empty());
     assert!(cfg.filters.ignore_actors.is_empty());
     assert!(!cfg.filters.only_involving_me);
-    assert_eq!(cfg.poll.max_concurrency, 1);
+    assert_eq!(cfg.poll.max_concurrency, None);
     assert_eq!(cfg.poll.timeout_seconds, 30);
 }
 
@@ -64,7 +64,7 @@ name = "octocat/hello-world"
 }
 
 #[test]
-fn stability_warnings_include_parallelism_ignored_warning() {
+fn stability_warnings_include_deprecated_parallelism_warning() {
     let src = r#"
 [poll]
 max_concurrency = 4
@@ -77,10 +77,8 @@ name = "octocat/hello-world"
     let warnings = stability_warnings(&cfg);
     assert!(warnings
         .iter()
-        .any(|warning| warning.contains("poll.max_concurrency")));
-    assert!(warnings
-        .iter()
-        .any(|warning| warning.contains("sequential")));
+        .any(|warning| warning.contains("poll.max_concurrency is deprecated")));
+    assert!(warnings.iter().any(|warning| warning.contains("ignored")));
 }
 
 #[test]
@@ -119,7 +117,7 @@ name = "octocat/hello-world"
 }
 
 #[test]
-fn parse_config_rejects_zero_poll_max_concurrency() {
+fn parse_config_accepts_zero_poll_max_concurrency_for_compatibility() {
     let src = r#"
 [poll]
 max_concurrency = 0
@@ -128,8 +126,8 @@ max_concurrency = 0
 name = "octocat/hello-world"
 "#;
 
-    let err = parse_config(src).expect_err("zero max_concurrency should fail");
-    assert!(err.to_string().contains("poll.max_concurrency"));
+    let cfg = parse_config(src).expect("max_concurrency should be accepted for compatibility");
+    assert_eq!(cfg.poll.max_concurrency, Some(0));
 }
 
 #[test]

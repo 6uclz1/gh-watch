@@ -3,7 +3,7 @@ use std::{fs, path::Path, path::PathBuf};
 use assert_cmd::cargo::cargo_bin_cmd;
 use chrono::{Duration, Utc};
 use gh_watch::infra::state_sqlite::SqliteStateStore;
-use gh_watch::ports::StateStorePort;
+use gh_watch::ports::CursorPort;
 use predicates::prelude::*;
 use tempfile::tempdir;
 

@@ -164,7 +164,7 @@ Add-Content -Path $PROFILE -Value '. "$HOME/.gh-watch.ps1"'
 - `r`: 手動更新
 - `Tab` / `Shift+Tab`: `Timeline` / `Repositories` タブ切替
 - `?`: ヘルプ表示切替
-- `Enter`: 選択URLを開く（WSLでは `powershell.exe` 経由でWindows既定ブラウザを開く）
+- `Enter`: 選択URLを開く（WSLでは `$BROWSER` を優先し、失敗/未設定時は `xdg-open` にフォールバック）
 - `↑` / `↓` or `j` / `k`: 1件移動（Timelineタブ）
 - `PageUp` / `PageDown`: 1ページ移動（Timelineタブ）
 - `g` / `Home`: 先頭（Timelineタブ）

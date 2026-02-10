@@ -371,7 +371,13 @@ fn open_url_in_browser(url: &str) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        return open_url_on_linux(url, detect_wsl(), run_linux_open_backend);
+        let browser_env = std::env::var("BROWSER").ok();
+        return open_url_on_linux(
+            url,
+            detect_wsl(),
+            browser_env.as_deref(),
+            run_linux_open_backend,
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -396,46 +402,67 @@ fn open_url_in_browser(url: &str) -> Result<()> {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinuxOpenBackend {
-    WslPowerShell,
+    BrowserEnv,
     XdgOpen,
 }
 
 #[cfg(target_os = "linux")]
-fn open_url_on_linux<F>(url: &str, is_wsl: bool, mut runner: F) -> Result<()>
+fn open_url_on_linux<F>(
+    url: &str,
+    is_wsl: bool,
+    browser_env: Option<&str>,
+    mut runner: F,
+) -> Result<()>
 where
-    F: FnMut(LinuxOpenBackend, &str) -> bool,
+    F: FnMut(LinuxOpenBackend, &str, Option<&str>) -> bool,
 {
-    let backend = if is_wsl {
-        LinuxOpenBackend::WslPowerShell
-    } else {
-        LinuxOpenBackend::XdgOpen
-    };
+    let browser_env = browser_env.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
 
-    if runner(backend, url) {
+    if is_wsl {
+        if let Some(browser_env) = browser_env {
+            if runner(LinuxOpenBackend::BrowserEnv, url, Some(browser_env)) {
+                return Ok(());
+            }
+            if runner(LinuxOpenBackend::XdgOpen, url, None) {
+                return Ok(());
+            }
+            return Err(anyhow!(
+                "failed to open URL in WSL with $BROWSER and xdg-open: {url}"
+            ));
+        }
+
+        if runner(LinuxOpenBackend::XdgOpen, url, None) {
+            return Ok(());
+        }
+        return Err(anyhow!("failed to open URL in WSL with xdg-open: {url}"));
+    }
+
+    if runner(LinuxOpenBackend::XdgOpen, url, None) {
         return Ok(());
     }
 
-    match backend {
-        LinuxOpenBackend::WslPowerShell => Err(anyhow!(
-            "failed to open URL with powershell.exe in WSL: {url}"
-        )),
-        LinuxOpenBackend::XdgOpen => Err(anyhow!("failed to open URL with xdg-open: {url}")),
-    }
+    Err(anyhow!("failed to open URL with xdg-open: {url}"))
 }
 
 #[cfg(target_os = "linux")]
-fn run_linux_open_backend(backend: LinuxOpenBackend, url: &str) -> bool {
+fn run_linux_open_backend(backend: LinuxOpenBackend, url: &str, browser_env: Option<&str>) -> bool {
     match backend {
-        LinuxOpenBackend::WslPowerShell => Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Start-Process $env:GH_WATCH_OPEN_URL | Out-Null",
-            ])
-            .env("GH_WATCH_OPEN_URL", url)
-            .status()
-            .map(|status| status.success())
+        LinuxOpenBackend::BrowserEnv => browser_env
+            .and_then(|raw| browser_command_from_env(raw, url))
+            .map(|(bin, args)| {
+                Command::new(bin)
+                    .args(args)
+                    .status()
+                    .map(|status| status.success())
+                    .unwrap_or(false)
+            })
             .unwrap_or(false),
         LinuxOpenBackend::XdgOpen => Command::new("xdg-open")
             .arg(url)
@@ -443,6 +470,77 @@ fn run_linux_open_backend(backend: LinuxOpenBackend, url: &str) -> bool {
             .map(|status| status.success())
             .unwrap_or(false),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn browser_command_from_env(raw: &str, url: &str) -> Option<(String, Vec<String>)> {
+    let mut tokens = split_shell_words(raw)?;
+    let has_placeholder = tokens.iter().any(|token| token.contains("%s"));
+
+    for token in &mut tokens {
+        if token.contains("%s") {
+            *token = token.replace("%s", url);
+        }
+    }
+
+    if !has_placeholder {
+        tokens.push(url.to_string());
+    }
+
+    let bin = tokens.remove(0);
+    Some((bin, tokens))
+}
+
+#[cfg(target_os = "linux")]
+fn split_shell_words(raw: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut active_quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in raw.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if let Some(quote) = active_quote {
+            if ch == quote {
+                active_quote = None;
+            } else if quote == '"' && ch == '\\' {
+                escaped = true;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => active_quote = Some(ch),
+            '\\' => escaped = true,
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if escaped || active_quote.is_some() {
+        return None;
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    if tokens.is_empty() {
+        return None;
+    }
+
+    Some(tokens)
 }
 
 #[cfg(target_os = "linux")]
@@ -964,35 +1062,82 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_open_uses_powershell_only_when_wsl() {
+    fn linux_open_wsl_prefers_browser_env_first() {
         let url = "https://example.com/wsl";
         let mut calls = Vec::new();
 
-        let result = super::open_url_on_linux(url, true, |backend, _url| {
+        let result = super::open_url_on_linux(
+            url,
+            true,
+            Some("firefox --new-window"),
+            |backend, _url, _| {
+                calls.push(backend);
+                true
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(calls, vec![super::LinuxOpenBackend::BrowserEnv]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_open_wsl_falls_back_to_xdg_open_when_browser_env_fails() {
+        let url = "https://example.com/wsl-fallback";
+        let mut calls = Vec::new();
+
+        let result = super::open_url_on_linux(url, true, Some("firefox"), |backend, _url, _| {
+            calls.push(backend);
+            backend == super::LinuxOpenBackend::XdgOpen
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(
+            calls,
+            vec![
+                super::LinuxOpenBackend::BrowserEnv,
+                super::LinuxOpenBackend::XdgOpen
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_open_wsl_uses_xdg_open_only_when_browser_env_absent() {
+        let url = "https://example.com/wsl-no-browser-env";
+        let mut calls = Vec::new();
+
+        let result = super::open_url_on_linux(url, true, Some("   "), |backend, _url, _| {
             calls.push(backend);
             true
         });
 
         assert!(result.is_ok());
-        assert_eq!(calls, vec![super::LinuxOpenBackend::WslPowerShell]);
+        assert_eq!(calls, vec![super::LinuxOpenBackend::XdgOpen]);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_open_wsl_failure_does_not_fallback_to_xdg_open() {
+    fn linux_open_wsl_failure_after_browser_and_xdg_open_returns_expected_error() {
         let url = "https://example.com/wsl-fail";
         let mut calls = Vec::new();
 
-        let err = super::open_url_on_linux(url, true, |backend, _url| {
+        let err = super::open_url_on_linux(url, true, Some("firefox"), |backend, _url, _| {
             calls.push(backend);
             false
         })
-        .expect_err("wsl powershell failure should bubble up");
+        .expect_err("wsl browser and xdg-open failures should bubble up");
 
-        assert_eq!(calls, vec![super::LinuxOpenBackend::WslPowerShell]);
+        assert_eq!(
+            calls,
+            vec![
+                super::LinuxOpenBackend::BrowserEnv,
+                super::LinuxOpenBackend::XdgOpen
+            ]
+        );
         assert_eq!(
             err.to_string(),
-            format!("failed to open URL with powershell.exe in WSL: {url}")
+            format!("failed to open URL in WSL with $BROWSER and xdg-open: {url}")
         );
     }
 
@@ -1002,13 +1147,75 @@ mod tests {
         let url = "https://example.com/linux";
         let mut calls = Vec::new();
 
-        let result = super::open_url_on_linux(url, false, |backend, _url| {
+        let result = super::open_url_on_linux(url, false, Some("firefox"), |backend, _url, _| {
             calls.push(backend);
             true
         });
 
         assert!(result.is_ok());
         assert_eq!(calls, vec![super::LinuxOpenBackend::XdgOpen]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_command_from_env_appends_url_without_placeholder() {
+        let url = "https://example.com/arg";
+        let (bin, args) = super::browser_command_from_env("firefox --new-window", url)
+            .expect("browser command should parse");
+
+        assert_eq!(bin, "firefox");
+        assert_eq!(
+            args,
+            vec![
+                "--new-window".to_string(),
+                "https://example.com/arg".to_string()
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_command_from_env_replaces_percent_s_placeholder() {
+        let url = "https://example.com/placeholder";
+        let (bin, args) = super::browser_command_from_env("w3m %s --title=%s", url)
+            .expect("browser command should parse");
+
+        assert_eq!(bin, "w3m");
+        assert_eq!(
+            args,
+            vec![
+                "https://example.com/placeholder".to_string(),
+                "--title=https://example.com/placeholder".to_string()
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_command_from_env_supports_quoted_command_path() {
+        let url = "https://example.com/quoted";
+        let (bin, args) = super::browser_command_from_env(
+            "\"/mnt/c/Program Files/Browser/browser.exe\" --profile default",
+            url,
+        )
+        .expect("browser command should parse");
+
+        assert_eq!(bin, "/mnt/c/Program Files/Browser/browser.exe");
+        assert_eq!(
+            args,
+            vec![
+                "--profile".to_string(),
+                "default".to_string(),
+                "https://example.com/quoted".to_string()
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_command_from_env_returns_none_for_unclosed_quote() {
+        let parsed = super::browser_command_from_env("\"/usr/bin/firefox", "https://example.com");
+        assert!(parsed.is_none());
     }
 
     #[cfg(target_os = "linux")]

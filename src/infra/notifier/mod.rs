@@ -18,27 +18,23 @@ const NON_MACOS_NOOP_WARNING: &str =
 const WSL_POWERSHELL_UNAVAILABLE_WARNING: &str =
     "WSL detected but powershell.exe is unavailable; using noop notifier";
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const WSL_BALLOON_TITLE_MAX_CHARS: usize = 63;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const WSL_BALLOON_BODY_MAX_CHARS: usize = 255;
+
 #[cfg(target_os = "linux")]
 const WSL_NOTIFY_POWERSHELL_SCRIPT: &str = r#"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+[void][reflection.assembly]::LoadWithPartialName('System.Windows.Forms')
+[void][reflection.assembly]::LoadWithPartialName('System.Drawing')
 $title = $env:GH_WATCH_NOTIFY_TITLE
 $body = $env:GH_WATCH_NOTIFY_BODY
-$url = $env:GH_WATCH_NOTIFY_URL
-$notifyIcon = New-Object System.Windows.Forms.NotifyIcon
-$notifyIcon.Icon = [System.Drawing.SystemIcons]::Information
-$notifyIcon.Visible = $true
-$notifyIcon.BalloonTipTitle = $title
-$notifyIcon.BalloonTipText = $body
-$notifyIcon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-if (-not [string]::IsNullOrWhiteSpace($url)) {
-    $notifyIcon.add_BalloonTipClicked({
-        Start-Process $env:GH_WATCH_NOTIFY_URL | Out-Null
-    })
-}
-$notifyIcon.ShowBalloonTip(10000)
+$notify = New-Object System.Windows.Forms.NotifyIcon
+$notify.Icon = [System.Drawing.SystemIcons]::Information
+$notify.Visible = $true
+$notify.ShowBalloonTip(10000, $title, $body, [System.Windows.Forms.ToolTipIcon]::Info)
 Start-Sleep -Milliseconds 10500
-$notifyIcon.Dispose()
+$notify.Dispose()
 "#;
 
 pub fn build_notification_body(event: &WatchEvent, include_url: bool) -> String {
@@ -61,6 +57,25 @@ fn dispatch_result(include_url: bool, click_action: bool) -> NotificationDispatc
     } else {
         NotificationDispatchResult::Delivered
     }
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn sanitize_wsl_balloon_text(raw: &str, max_chars: usize) -> String {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized_len = normalized.chars().count();
+
+    if normalized_len <= max_chars {
+        return normalized;
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let head = normalized.chars().take(max_chars - 3).collect::<String>();
+    format!("{head}...")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,10 +164,9 @@ impl NotifierPort for DesktopNotifier {
 
     fn click_action_support(&self) -> NotificationClickSupport {
         match self.backend {
-            DesktopBackendKind::WslPowerShell => NotificationClickSupport::Supported,
-            DesktopBackendKind::MacOs | DesktopBackendKind::Noop => {
-                NotificationClickSupport::Unsupported
-            }
+            DesktopBackendKind::WslPowerShell
+            | DesktopBackendKind::MacOs
+            | DesktopBackendKind::Noop => NotificationClickSupport::Unsupported,
         }
     }
 
@@ -177,8 +191,8 @@ impl NotifierPort for DesktopNotifier {
             DesktopBackendKind::WslPowerShell => {
                 #[cfg(target_os = "linux")]
                 {
-                    notify_via_powershell(&title, &body, &event.url)?;
-                    Ok(dispatch_result(include_url, true))
+                    notify_via_powershell(&title, &body)?;
+                    Ok(dispatch_result(include_url, false))
                 }
 
                 #[cfg(not(target_os = "linux"))]
@@ -342,7 +356,9 @@ fn notify_via_osascript(title: &str, body: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn notify_via_powershell(title: &str, body: &str, url: &str) -> Result<()> {
+fn notify_via_powershell(title: &str, body: &str) -> Result<()> {
+    let title = sanitize_wsl_balloon_text(title, WSL_BALLOON_TITLE_MAX_CHARS);
+    let body = sanitize_wsl_balloon_text(body, WSL_BALLOON_BODY_MAX_CHARS);
     let output = Command::new("powershell.exe")
         .args([
             "-NoProfile",
@@ -352,7 +368,6 @@ fn notify_via_powershell(title: &str, body: &str, url: &str) -> Result<()> {
         ])
         .env("GH_WATCH_NOTIFY_TITLE", title)
         .env("GH_WATCH_NOTIFY_BODY", body)
-        .env("GH_WATCH_NOTIFY_URL", url)
         .output()
         .context("failed to execute powershell.exe")?;
 
@@ -399,14 +414,14 @@ fn escape_apple_script_literal(raw: &str) -> String {
 mod tests {
     use chrono::{TimeZone, Utc};
 
-    #[cfg(target_os = "macos")]
-    use super::DesktopNotifier;
     use super::{
-        build_notification_body, is_wsl_from_inputs, select_linux_backend, DesktopBackendKind,
+        build_notification_body, is_wsl_from_inputs, sanitize_wsl_balloon_text,
+        select_linux_backend, DesktopBackendKind, DesktopNotifier,
     };
     #[cfg(target_os = "macos")]
     use crate::config::NotificationConfig;
     use crate::domain::events::{EventKind, WatchEvent};
+    use crate::ports::{NotificationClickSupport, NotificationDispatchResult, NotifierPort};
 
     fn sample_event() -> WatchEvent {
         WatchEvent {
@@ -487,6 +502,62 @@ mod tests {
         assert_eq!(selected.kind, DesktopBackendKind::Noop);
         let warning = selected.startup_warning.expect("warning should exist");
         assert!(warning.contains("powershell.exe"));
+    }
+
+    #[test]
+    fn wsl_click_action_support_is_unsupported() {
+        let notifier = DesktopNotifier {
+            backend: DesktopBackendKind::WslPowerShell,
+            startup_warnings: Vec::new(),
+        };
+
+        assert_eq!(
+            notifier.click_action_support(),
+            NotificationClickSupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn sanitize_wsl_balloon_text_normalizes_whitespace() {
+        let normalized = sanitize_wsl_balloon_text("line1\n  line2\t\tline3\r\nline4", 255);
+        assert_eq!(normalized, "line1 line2 line3 line4");
+    }
+
+    #[test]
+    fn sanitize_wsl_balloon_text_truncates_with_ellipsis() {
+        let title = sanitize_wsl_balloon_text(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!?",
+            63,
+        );
+        assert_eq!(
+            title,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567..."
+        );
+
+        let body = sanitize_wsl_balloon_text(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            255,
+        );
+        assert_eq!(
+            body,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..."
+        );
+    }
+
+    #[test]
+    fn dispatch_result_returns_body_url_fallback_without_click_action() {
+        assert_eq!(
+            super::dispatch_result(true, false),
+            NotificationDispatchResult::DeliveredWithBodyUrlFallback
+        );
+    }
+
+    #[test]
+    fn dispatch_result_returns_delivered_without_url_and_click_action() {
+        assert_eq!(
+            super::dispatch_result(false, false),
+            NotificationDispatchResult::Delivered
+        );
     }
 
     #[cfg(target_os = "macos")]

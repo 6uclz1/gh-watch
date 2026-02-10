@@ -42,7 +42,6 @@ name = "octocat/hello-world"
     assert!(cfg.filters.event_kinds.is_empty());
     assert!(cfg.filters.ignore_actors.is_empty());
     assert!(!cfg.filters.only_involving_me);
-    assert_eq!(cfg.poll.max_concurrency, None);
     assert_eq!(cfg.poll.timeout_seconds, 30);
 }
 
@@ -61,24 +60,6 @@ name = "octocat/hello-world"
         .iter()
         .any(|warning| warning.contains("interval_seconds")));
     assert!(warnings.iter().any(|warning| warning.contains(">= 30")));
-}
-
-#[test]
-fn stability_warnings_include_deprecated_parallelism_warning() {
-    let src = r#"
-[poll]
-max_concurrency = 4
-
-[[repositories]]
-name = "octocat/hello-world"
-"#;
-    let cfg = parse_config(src).expect("config should parse");
-
-    let warnings = stability_warnings(&cfg);
-    assert!(warnings
-        .iter()
-        .any(|warning| warning.contains("poll.max_concurrency is deprecated")));
-    assert!(warnings.iter().any(|warning| warning.contains("ignored")));
 }
 
 #[test]
@@ -117,7 +98,7 @@ name = "octocat/hello-world"
 }
 
 #[test]
-fn parse_config_accepts_zero_poll_max_concurrency_for_compatibility() {
+fn parse_config_rejects_removed_poll_max_concurrency_key() {
     let src = r#"
 [poll]
 max_concurrency = 0
@@ -126,8 +107,10 @@ max_concurrency = 0
 name = "octocat/hello-world"
 "#;
 
-    let cfg = parse_config(src).expect("max_concurrency should be accepted for compatibility");
-    assert_eq!(cfg.poll.max_concurrency, Some(0));
+    let err = parse_config(src).expect_err("removed key should fail");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("failed to parse config TOML"));
+    assert!(msg.contains("max_concurrency"));
 }
 
 #[test]

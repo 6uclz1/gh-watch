@@ -146,7 +146,7 @@ name = "acme/api"
 }
 
 #[test]
-fn init_reset_state_accepts_removed_failure_history_limit_key() {
+fn init_reset_state_rejects_removed_failure_history_limit_key() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     let state_db = dir.path().join("state.db");
@@ -172,11 +172,9 @@ name = "acme/api"
         .arg("--path")
         .arg(&config_path)
         .assert()
-        .success()
-        .stdout(contains("reset state db:"))
-        .stdout(contains(state_db.display().to_string()));
-
-    assert!(state_db.exists());
+        .failure()
+        .stderr(contains("failed to parse config TOML"))
+        .stderr(contains("failure_history_limit"));
 }
 
 #[test]

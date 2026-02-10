@@ -204,7 +204,7 @@ Notification config keys:
 Polling reliability notes:
 
 - `interval_seconds < 30` is allowed but prints a stability warning at startup.
-- `poll.max_concurrency` is accepted for backward compatibility, but it is deprecated and ignored (fetch execution is forced sequential).
+- Removed/unknown config keys are rejected as parse errors, including `poll.max_concurrency` and `failure_history_limit` (also for `gh-watch init --reset-state`).
 
 ## Notification Backend
 

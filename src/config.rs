@@ -111,8 +111,6 @@ pub struct FiltersConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PollConfig {
-    #[serde(default)]
-    pub max_concurrency: Option<usize>,
     #[serde(default = "default_poll_timeout_seconds")]
     pub timeout_seconds: u64,
 }
@@ -120,7 +118,6 @@ pub struct PollConfig {
 impl Default for PollConfig {
     fn default() -> Self {
         Self {
-            max_concurrency: None,
             timeout_seconds: default_poll_timeout_seconds(),
         }
     }
@@ -323,12 +320,6 @@ pub fn stability_warnings(cfg: &Config) -> Vec<String> {
         warnings.push(format!(
             "stability warning: interval_seconds={} is short; recommend >= 30 for reliable polling",
             cfg.interval_seconds
-        ));
-    }
-
-    if let Some(configured) = cfg.poll.max_concurrency {
-        warnings.push(format!(
-            "stability warning: poll.max_concurrency is deprecated and ignored (configured={configured}); repository polling is forced sequential"
         ));
     }
 

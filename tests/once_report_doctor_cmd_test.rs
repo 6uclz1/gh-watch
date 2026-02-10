@@ -393,7 +393,6 @@ enabled = true
 include_url = true
 
 [poll]
-max_concurrency = 4
 timeout_seconds = 30
 "#
     );

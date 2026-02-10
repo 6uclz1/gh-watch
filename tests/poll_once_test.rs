@@ -318,7 +318,6 @@ fn cfg() -> Config {
         },
         filters: FiltersConfig::default(),
         poll: PollConfig {
-            max_concurrency: Some(4),
             timeout_seconds: 30,
         },
     }
@@ -506,15 +505,13 @@ async fn repo_fetch_retries_temporary_failures_and_succeeds() {
 }
 
 #[tokio::test]
-async fn repo_fetch_runs_sequentially_even_when_config_concurrency_is_high() {
+async fn repo_fetch_runs_sequentially() {
     let gh = FakeGh::default();
     let state = FakeState::default();
     let notifier = FakeNotifier::default();
     let clock = FixedClock {
         now: Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
     };
-    let mut local_cfg = cfg();
-    local_cfg.poll.max_concurrency = Some(8);
 
     state.set_cursor(
         "acme/api",
@@ -529,7 +526,7 @@ async fn repo_fetch_runs_sequentially_even_when_config_concurrency_is_high() {
     gh.set_events("acme/api", Vec::new());
     gh.set_events("acme/web", Vec::new());
 
-    let out = poll_once(&local_cfg, &gh, &state, &notifier, &clock)
+    let out = poll_once(&cfg(), &gh, &state, &notifier, &clock)
         .await
         .expect("poll should succeed");
     assert_eq!(out.fetch_failures.len(), 0);

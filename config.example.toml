@@ -14,7 +14,8 @@ include_url = true
 # only_involving_me = false
 
 [poll]
-max_concurrency = 4
+# Reliability-first mode: repository fetches run sequentially.
+max_concurrency = 1
 timeout_seconds = 30
 
 [[repositories]]

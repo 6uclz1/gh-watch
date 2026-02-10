@@ -8,6 +8,10 @@ use crate::{
 };
 
 pub(crate) async fn run(cfg: Config, resolved_config: ResolvedConfigPath) -> Result<()> {
+    for warning in crate::config::stability_warnings(&cfg) {
+        eprintln!("{warning}");
+    }
+
     let gh = GhCliClient::default();
     gh.check_auth()
         .await

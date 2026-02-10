@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
+    time::Duration as StdDuration,
 };
 
 use anyhow::{anyhow, Result};
@@ -23,6 +24,11 @@ struct FakeGh {
     viewer_login: Arc<Mutex<String>>,
     events_by_repo: Arc<Mutex<HashMap<String, Vec<WatchEvent>>>>,
     fail_repos: Arc<Mutex<HashMap<String, String>>>,
+    fail_n_times_repos: Arc<Mutex<HashMap<String, (usize, String)>>>,
+    fetch_delay_ms_by_repo: Arc<Mutex<HashMap<String, u64>>>,
+    fetch_attempts_by_repo: Arc<Mutex<HashMap<String, usize>>>,
+    in_flight_fetches: Arc<Mutex<usize>>,
+    max_concurrent_fetches: Arc<Mutex<usize>>,
 }
 
 impl FakeGh {
@@ -38,6 +44,58 @@ impl FakeGh {
             .lock()
             .unwrap()
             .insert(repo.to_string(), message.to_string());
+    }
+
+    fn fail_repo_n_times(&self, repo: &str, times: usize, message: &str) {
+        self.fail_n_times_repos
+            .lock()
+            .unwrap()
+            .insert(repo.to_string(), (times, message.to_string()));
+    }
+
+    fn set_fetch_delay_ms(&self, repo: &str, delay_ms: u64) {
+        self.fetch_delay_ms_by_repo
+            .lock()
+            .unwrap()
+            .insert(repo.to_string(), delay_ms);
+    }
+
+    fn fetch_attempt_count(&self, repo: &str) -> usize {
+        self.fetch_attempts_by_repo
+            .lock()
+            .unwrap()
+            .get(repo)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn max_in_flight_fetches(&self) -> usize {
+        *self.max_concurrent_fetches.lock().unwrap()
+    }
+}
+
+struct InFlightGuard {
+    counter: Arc<Mutex<usize>>,
+}
+
+impl InFlightGuard {
+    fn enter(counter: Arc<Mutex<usize>>, max_counter: Arc<Mutex<usize>>) -> Self {
+        {
+            let mut active = counter.lock().unwrap();
+            *active += 1;
+            let mut max = max_counter.lock().unwrap();
+            if *active > *max {
+                *max = *active;
+            }
+        }
+        Self { counter }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        let mut active = self.counter.lock().unwrap();
+        *active = active.saturating_sub(1);
     }
 }
 
@@ -56,6 +114,46 @@ impl GhClientPort for FakeGh {
         repo: &str,
         _since: chrono::DateTime<Utc>,
     ) -> Result<Vec<WatchEvent>> {
+        let _guard = InFlightGuard::enter(
+            self.in_flight_fetches.clone(),
+            self.max_concurrent_fetches.clone(),
+        );
+
+        self.fetch_attempts_by_repo
+            .lock()
+            .unwrap()
+            .entry(repo.to_string())
+            .and_modify(|attempts| *attempts += 1)
+            .or_insert(1);
+
+        let delay_ms = self
+            .fetch_delay_ms_by_repo
+            .lock()
+            .unwrap()
+            .get(repo)
+            .copied()
+            .unwrap_or(0);
+        if delay_ms > 0 {
+            tokio::time::sleep(StdDuration::from_millis(delay_ms)).await;
+        }
+
+        let transient_error = {
+            let mut transient = self.fail_n_times_repos.lock().unwrap();
+            if let Some((remaining, message)) = transient.get_mut(repo) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    Some(message.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(message) = transient_error {
+            return Err(anyhow!(message));
+        }
+
         if let Some(message) = self.fail_repos.lock().unwrap().get(repo).cloned() {
             return Err(anyhow!(message));
         }
@@ -319,7 +417,7 @@ async fn non_bootstrap_poll_notifies_new_events() {
 }
 
 #[tokio::test]
-async fn repo_fetch_failure_returns_error() {
+async fn repo_fetch_partial_failure_returns_success_with_failure_details() {
     let gh = FakeGh::default();
     let state = FakeState::default();
     let notifier = FakeNotifier::default();
@@ -336,11 +434,118 @@ async fn repo_fetch_failure_returns_error() {
         Utc.with_ymd_and_hms(2025, 1, 19, 0, 0, 0).unwrap(),
     );
     gh.fail_repo("acme/api", "boom");
+    gh.set_events(
+        "acme/web",
+        vec![event(
+            "acme/web",
+            "ev-web-1",
+            Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
+        )],
+    );
+
+    let out = poll_once(&cfg(), &gh, &state, &notifier, &clock)
+        .await
+        .expect("partial failure should still return success");
+    assert_eq!(out.notified_count, 1);
+    assert_eq!(out.fetch_failures.len(), 1);
+    assert_eq!(out.fetch_failures[0].repo, "acme/api");
+    assert!(out.fetch_failures[0].message.contains("boom"));
+}
+
+#[tokio::test]
+async fn repo_fetch_returns_error_when_all_repositories_fail() {
+    let gh = FakeGh::default();
+    let state = FakeState::default();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
+    };
+
+    state.set_cursor(
+        "acme/api",
+        Utc.with_ymd_and_hms(2025, 1, 19, 0, 0, 0).unwrap(),
+    );
+    state.set_cursor(
+        "acme/web",
+        Utc.with_ymd_and_hms(2025, 1, 19, 0, 0, 0).unwrap(),
+    );
+    gh.fail_repo("acme/api", "api boom");
+    gh.fail_repo("acme/web", "web boom");
 
     let err = poll_once(&cfg(), &gh, &state, &notifier, &clock)
         .await
-        .expect_err("repo fetch should fail");
-    assert!(err.to_string().contains("acme/api"));
+        .expect_err("all repo failures should return error");
+    let message = err.to_string();
+    assert!(message.contains("all repository fetches failed"));
+    assert!(message.contains("acme/api"));
+    assert!(message.contains("acme/web"));
+}
+
+#[tokio::test]
+async fn repo_fetch_retries_temporary_failures_and_succeeds() {
+    let gh = FakeGh::default();
+    let state = FakeState::default();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
+    };
+
+    state.set_cursor(
+        "acme/api",
+        Utc.with_ymd_and_hms(2025, 1, 19, 0, 0, 0).unwrap(),
+    );
+    state.set_cursor(
+        "acme/web",
+        Utc.with_ymd_and_hms(2025, 1, 19, 0, 0, 0).unwrap(),
+    );
+    gh.fail_repo_n_times("acme/api", 2, "transient");
+    gh.set_events(
+        "acme/api",
+        vec![event(
+            "acme/api",
+            "ev-retry-1",
+            Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
+        )],
+    );
+    gh.set_events("acme/web", Vec::new());
+
+    let out = poll_once(&cfg(), &gh, &state, &notifier, &clock)
+        .await
+        .expect("third attempt should succeed");
+    assert_eq!(gh.fetch_attempt_count("acme/api"), 3);
+    assert_eq!(out.fetch_failures.len(), 0);
+    assert_eq!(out.notified_count, 1);
+}
+
+#[tokio::test]
+async fn repo_fetch_runs_sequentially_even_when_config_concurrency_is_high() {
+    let gh = FakeGh::default();
+    let state = FakeState::default();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
+    };
+    let mut local_cfg = cfg();
+    local_cfg.poll.max_concurrency = 8;
+
+    state.set_cursor(
+        "acme/api",
+        Utc.with_ymd_and_hms(2025, 1, 19, 0, 0, 0).unwrap(),
+    );
+    state.set_cursor(
+        "acme/web",
+        Utc.with_ymd_and_hms(2025, 1, 19, 0, 0, 0).unwrap(),
+    );
+    gh.set_fetch_delay_ms("acme/api", 30);
+    gh.set_fetch_delay_ms("acme/web", 30);
+    gh.set_events("acme/api", Vec::new());
+    gh.set_events("acme/web", Vec::new());
+
+    let out = poll_once(&local_cfg, &gh, &state, &notifier, &clock)
+        .await
+        .expect("poll should succeed");
+    assert_eq!(out.fetch_failures.len(), 0);
+    assert_eq!(gh.max_in_flight_fetches(), 1);
 }
 
 #[tokio::test]

@@ -246,10 +246,17 @@ where
     match result {
         Ok(outcome) => {
             let new_count = outcome.timeline_events.len();
+            let repo_failure_count = outcome.fetch_failures.len();
             if new_count > 0 {
                 model.push_timeline(outcome.timeline_events);
             }
-            model.status_line = format!("ok (new={new_count})");
+            if repo_failure_count > 0 {
+                model.failure_count += repo_failure_count as u64;
+                model.status_line =
+                    format!("ok (new={new_count}, repo_failures={repo_failure_count})");
+            } else {
+                model.status_line = format!("ok (new={new_count})");
+            }
             model.last_success_at = Some(clock.now());
         }
         Err(err) => {
@@ -823,6 +830,27 @@ mod tests {
 
         apply_poll_result(Err(anyhow!("boom")), &mut model, &clock);
         assert_eq!(model.status_line, "poll failed: boom");
+        assert_eq!(model.failure_count, 1);
+    }
+
+    #[test]
+    fn watch_status_tracks_repo_fetch_failures_on_partial_success() {
+        let clock = FixedClock {
+            now: Utc.with_ymd_and_hms(2025, 1, 8, 12, 0, 0).unwrap(),
+        };
+        let mut model = TuiModel::new(10);
+
+        let outcome = PollOutcome {
+            timeline_events: vec![timeline_event("ev-a", clock.now)],
+            fetch_failures: vec![crate::app::poll_once::RepoFetchFailure {
+                repo: "acme/web".to_string(),
+                message: "boom".to_string(),
+            }],
+            ..PollOutcome::default()
+        };
+        apply_poll_result(Ok(outcome), &mut model, &clock);
+
+        assert_eq!(model.status_line, "ok (new=1, repo_failures=1)");
         assert_eq!(model.failure_count, 1);
     }
 

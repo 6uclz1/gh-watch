@@ -63,6 +63,10 @@ pub(crate) async fn run(
     dry_run: bool,
     json: bool,
 ) -> Result<()> {
+    for warning in crate::config::stability_warnings(&cfg) {
+        eprintln!("{warning}");
+    }
+
     let gh = GhCliClient::default();
     gh.check_auth()
         .await
@@ -96,6 +100,10 @@ pub(crate) async fn run(
         );
         println!("notified: {}", outcome.notified_count);
         println!("bootstrap_repos: {}", outcome.bootstrap_repos);
+        println!("repo_fetch_failures: {}", outcome.fetch_failures.len());
+        for failure in &outcome.fetch_failures {
+            println!("- {}: {}", failure.repo, failure.message);
+        }
         if dry_run {
             println!("mode: dry-run (state unchanged)");
         }

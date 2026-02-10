@@ -147,7 +147,7 @@ fn default_true() -> bool {
 }
 
 fn default_poll_max_concurrency() -> usize {
-    4
+    1
 }
 
 fn default_poll_timeout_seconds() -> u64 {
@@ -322,6 +322,26 @@ fn validate_config(cfg: &Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn stability_warnings(cfg: &Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if cfg.interval_seconds < 30 {
+        warnings.push(format!(
+            "stability warning: interval_seconds={} is short; recommend >= 30 for reliable polling",
+            cfg.interval_seconds
+        ));
+    }
+
+    if cfg.poll.max_concurrency > 1 {
+        warnings.push(format!(
+            "stability warning: poll.max_concurrency={} is ignored because repository polling is forced sequential",
+            cfg.poll.max_concurrency
+        ));
+    }
+
+    warnings
 }
 
 fn validate_repo_name(repo: &str) -> Result<()> {

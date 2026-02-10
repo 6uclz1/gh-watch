@@ -154,10 +154,13 @@ Global filter keys:
 
 - First run bootstraps cursor and does not notify.
 - Polling uses a fixed 5-minute overlap (`since = last_cursor - 300s`) to reduce boundary misses.
+- Repository fetches run sequentially for reliability (parallel fetch is disabled).
+- Each repository fetch retries up to 3 attempts (backoff: 1s, then 2s).
 - Per-repository cursor is updated to poll start time (not post-processing `now`).
 - New events are durably persisted first, then notified immediately in the same poll cycle.
 - `event_key` deduplicates overlap re-fetches and prevents re-notifying already logged events.
-- Polling and notification errors fail the current cycle immediately (fail-fast).
+- Repository fetch failures are treated as partial failures: successful repositories still complete.
+- If all repositories fail to fetch in a cycle, that cycle fails.
 
 ## TUI Key Bindings
 
@@ -197,6 +200,11 @@ Notification config keys:
 
 - `[notifications].enabled`
 - `[notifications].include_url`
+
+Polling reliability notes:
+
+- `interval_seconds < 30` is allowed but prints a stability warning at startup.
+- `poll.max_concurrency` remains configurable for compatibility, but fetch execution is forced sequential.
 
 ## Notification Backend
 

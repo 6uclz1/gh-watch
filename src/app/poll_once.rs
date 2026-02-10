@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, Utc};
-use futures_util::stream::{self, StreamExt};
 use serde::Serialize;
 use std::{collections::HashSet, time::Duration as StdDuration};
 
@@ -11,6 +10,14 @@ use crate::{
 };
 
 const POLL_OVERLAP_SECONDS: i64 = 300;
+const REPO_FETCH_MAX_ATTEMPTS: usize = 3;
+const REPO_FETCH_RETRY_BACKOFFS_SECONDS: [u64; REPO_FETCH_MAX_ATTEMPTS - 1] = [1, 2];
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RepoFetchFailure {
+    pub repo: String,
+    pub message: String,
+}
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PollOutcome {
@@ -18,6 +25,7 @@ pub struct PollOutcome {
     pub bootstrap_repos: usize,
     pub notified_events: Vec<WatchEvent>,
     pub timeline_events: Vec<WatchEvent>,
+    pub fetch_failures: Vec<RepoFetchFailure>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +82,10 @@ where
 
     let plans = plan_window(config, state, clock)?;
     let fetch_results = collect_events(config, gh, plans).await;
+    let fetched_repo_count = fetch_results
+        .iter()
+        .filter(|result| matches!(result, RepoFetchResult::Fetched { .. }))
+        .count();
     let mut outcome = PollOutcome {
         bootstrap_repos: fetch_results
             .iter()
@@ -109,9 +121,22 @@ where
                 repo_name,
                 error_message,
             } => {
-                return Err(anyhow!("{repo_name}: {error_message}"));
+                outcome.fetch_failures.push(RepoFetchFailure {
+                    repo: repo_name,
+                    message: error_message,
+                });
             }
         }
+    }
+
+    if fetched_repo_count == 0 && !outcome.fetch_failures.is_empty() {
+        let details = outcome
+            .fetch_failures
+            .iter()
+            .map(|failure| format!("{}: {}", failure.repo, failure.message))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Err(anyhow!("all repository fetches failed: {details}"));
     }
 
     Ok(outcome)
@@ -179,27 +204,45 @@ where
 {
     let timeout = StdDuration::from_secs(config.poll.timeout_seconds);
     let timeout_seconds = config.poll.timeout_seconds;
-    let mut fetches = stream::iter(plans.into_iter().map(|plan| async move {
-        let result =
-            tokio::time::timeout(timeout, gh.fetch_repo_events(&plan.repo_name, plan.since)).await;
-        match result {
-            Ok(Ok(events)) => RepoFetchResult::Fetched { plan, events },
-            Ok(Err(err)) => RepoFetchResult::Failed {
-                repo_name: plan.repo_name,
-                error_message: err.to_string(),
-            },
-            Err(_) => RepoFetchResult::Failed {
-                repo_name: plan.repo_name,
-                error_message: format!("repo polling timed out after {timeout_seconds}s"),
-            },
-        }
-    }))
-    .buffer_unordered(config.poll.max_concurrency);
-
     let mut results = Vec::new();
-    while let Some(fetch_result) = fetches.next().await {
-        results.push(fetch_result);
+
+    for plan in plans {
+        let mut fetched_events: Option<Vec<WatchEvent>> = None;
+        let mut last_error = String::new();
+
+        for attempt in 1..=REPO_FETCH_MAX_ATTEMPTS {
+            let result =
+                tokio::time::timeout(timeout, gh.fetch_repo_events(&plan.repo_name, plan.since))
+                    .await;
+            match result {
+                Ok(Ok(events)) => {
+                    fetched_events = Some(events);
+                    break;
+                }
+                Ok(Err(err)) => {
+                    last_error = err.to_string();
+                }
+                Err(_) => {
+                    last_error = format!("repo polling timed out after {timeout_seconds}s");
+                }
+            }
+
+            if attempt < REPO_FETCH_MAX_ATTEMPTS {
+                let backoff_index = attempt - 1;
+                let wait_seconds = REPO_FETCH_RETRY_BACKOFFS_SECONDS[backoff_index];
+                tokio::time::sleep(StdDuration::from_secs(wait_seconds)).await;
+            }
+        }
+
+        match fetched_events {
+            Some(events) => results.push(RepoFetchResult::Fetched { plan, events }),
+            None => results.push(RepoFetchResult::Failed {
+                repo_name: plan.repo_name,
+                error_message: last_error,
+            }),
+        }
     }
+
     results
 }
 

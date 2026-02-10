@@ -8,7 +8,7 @@ use predicates::prelude::*;
 use tempfile::tempdir;
 
 #[test]
-fn once_json_returns_failure_exit_code_1_when_any_repo_fails() {
+fn once_json_returns_success_exit_code_0_when_some_repos_fail() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     let state_db_path = dir.path().join("state.db");
@@ -68,8 +68,141 @@ exit 1
         .arg("--json")
         .env("GH_WATCH_GH_BIN", gh_path)
         .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("\"fetch_failures\""))
+        .stdout(predicate::str::contains("\"repo\":\"acme/web\""));
+}
+
+#[test]
+fn once_text_reports_repo_fetch_failures_when_partial_failures_happen() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let state_db_path = dir.path().join("state.db");
+    write_config(&config_path, &state_db_path, &["acme/api", "acme/web"]);
+
+    let gh_path = write_stub_gh(
+        dir.path(),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "auth" && "$2" == "status" ]]; then
+  exit 0
+fi
+if [[ "$1" == "api" ]]; then
+  endpoint="${@: -1}"
+  if [[ "$endpoint" == "repos/acme/web/pulls"* ]]; then
+    echo "boom" >&2
+    exit 1
+  fi
+  if [[ "$endpoint" == "repos/acme/api/pulls"* ]]; then
+    echo '[]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/api/issues"* ]]; then
+    echo '[]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/web/issues"* ]]; then
+    echo '[]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/api/issues/comments"* ]]; then
+    echo '[[]]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/web/issues/comments"* ]]; then
+    echo '[[]]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/api/pulls/comments"* ]]; then
+    echo '[[]]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/web/pulls/comments"* ]]; then
+    echo '[[]]'
+    exit 0
+  fi
+fi
+echo "unexpected args: $@" >&2
+exit 1
+"#,
+    );
+
+    let mut cmd = cargo_bin_cmd!("gh-watch");
+    cmd.arg("once")
+        .arg("--config")
+        .arg(&config_path)
+        .env("GH_WATCH_GH_BIN", gh_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("repo_fetch_failures: 1"))
+        .stdout(predicate::str::contains("- acme/web:"));
+}
+
+#[test]
+fn once_returns_failure_exit_code_1_when_all_repos_fail() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let state_db_path = dir.path().join("state.db");
+    write_config(&config_path, &state_db_path, &["acme/api", "acme/web"]);
+
+    let gh_path = write_stub_gh(
+        dir.path(),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "auth" && "$2" == "status" ]]; then
+  exit 0
+fi
+if [[ "$1" == "api" ]]; then
+  endpoint="${@: -1}"
+  if [[ "$endpoint" == "repos/acme/api/pulls"* ]]; then
+    echo "api boom" >&2
+    exit 1
+  fi
+  if [[ "$endpoint" == "repos/acme/web/pulls"* ]]; then
+    echo "web boom" >&2
+    exit 1
+  fi
+  if [[ "$endpoint" == "repos/acme/api/issues"* ]]; then
+    echo '[]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/web/issues"* ]]; then
+    echo '[]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/api/issues/comments"* ]]; then
+    echo '[[]]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/web/issues/comments"* ]]; then
+    echo '[[]]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/api/pulls/comments"* ]]; then
+    echo '[[]]'
+    exit 0
+  fi
+  if [[ "$endpoint" == "repos/acme/web/pulls/comments"* ]]; then
+    echo '[[]]'
+    exit 0
+  fi
+fi
+echo "unexpected args: $@" >&2
+exit 1
+"#,
+    );
+
+    let mut cmd = cargo_bin_cmd!("gh-watch");
+    cmd.arg("once")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--json")
+        .env("GH_WATCH_GH_BIN", gh_path)
+        .assert()
         .failure()
-        .code(1);
+        .code(1)
+        .stderr(predicate::str::contains("all repository fetches failed"));
 }
 
 #[test]

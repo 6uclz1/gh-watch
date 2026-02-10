@@ -17,6 +17,9 @@ pub(crate) async fn run(cfg: Config, resolved_config: ResolvedConfigPath) -> Res
         resolved_config.path.display(),
         resolved_config.source
     );
+    for warning in crate::config::stability_warnings(&cfg) {
+        eprintln!("{warning}");
+    }
 
     let gh = GhCliClient::default();
     gh.check_auth()

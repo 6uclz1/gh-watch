@@ -5,7 +5,8 @@ use std::{
 };
 
 use gh_watch::config::{
-    parse_config, resolve_config_path, resolve_config_path_with_source, ConfigPathSource,
+    parse_config, resolve_config_path, resolve_config_path_with_source, stability_warnings,
+    ConfigPathSource,
 };
 use tempfile::tempdir;
 
@@ -41,8 +42,45 @@ name = "octocat/hello-world"
     assert!(cfg.filters.event_kinds.is_empty());
     assert!(cfg.filters.ignore_actors.is_empty());
     assert!(!cfg.filters.only_involving_me);
-    assert_eq!(cfg.poll.max_concurrency, 4);
+    assert_eq!(cfg.poll.max_concurrency, 1);
     assert_eq!(cfg.poll.timeout_seconds, 30);
+}
+
+#[test]
+fn stability_warnings_include_short_interval_warning() {
+    let src = r#"
+interval_seconds = 10
+
+[[repositories]]
+name = "octocat/hello-world"
+"#;
+    let cfg = parse_config(src).expect("config should parse");
+
+    let warnings = stability_warnings(&cfg);
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.contains("interval_seconds")));
+    assert!(warnings.iter().any(|warning| warning.contains(">= 30")));
+}
+
+#[test]
+fn stability_warnings_include_parallelism_ignored_warning() {
+    let src = r#"
+[poll]
+max_concurrency = 4
+
+[[repositories]]
+name = "octocat/hello-world"
+"#;
+    let cfg = parse_config(src).expect("config should parse");
+
+    let warnings = stability_warnings(&cfg);
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.contains("poll.max_concurrency")));
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.contains("sequential")));
 }
 
 #[test]

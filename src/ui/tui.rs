@@ -586,6 +586,32 @@ fn truncate_tail(raw: &str, max_chars: usize) -> String {
     clipped
 }
 
+fn sanitize_single_line(raw: &str) -> String {
+    let mut sanitized = String::with_capacity(raw.len());
+    let mut pending_space = false;
+
+    for ch in raw.chars() {
+        let mapped = if ch == '\n' || ch == '\r' || ch == '\t' || ch.is_control() {
+            ' '
+        } else {
+            ch
+        };
+
+        if mapped.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+
+        if pending_space && !sanitized.is_empty() {
+            sanitized.push(' ');
+        }
+        pending_space = false;
+        sanitized.push(mapped);
+    }
+
+    sanitized
+}
+
 fn build_status_line(model: &TuiModel, now: DateTime<Utc>, glyph_mode: GlyphMode) -> String {
     if model.is_polling {
         let elapsed_secs = model
@@ -611,7 +637,7 @@ fn build_status_line(model: &TuiModel, now: DateTime<Utc>, glyph_mode: GlyphMode
     }
 
     if is_error_status(&model.status_line) {
-        let detail = truncate_tail(&model.status_line, 48);
+        let detail = truncate_tail(&sanitize_single_line(&model.status_line), 48);
         return match glyph_mode {
             GlyphMode::Nerd => format!("󰅚 {detail} 󰅚 {}", model.failure_count),
             GlyphMode::Ascii => format!("! {detail} fail={}", model.failure_count),
@@ -906,6 +932,19 @@ mod tests {
         model.status_line = "opened: https://example.com/x".to_string();
         let line_ok = build_status_line(&model, now, GlyphMode::Ascii);
         assert_eq!(line_ok, "+ ready next=- fail=0");
+    }
+
+    #[test]
+    fn loading_status_line_sanitizes_multiline_error_detail() {
+        let now = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let mut model = TuiModel::new(10);
+        model.status_line = "open failed:\nlauncher\tmissing\u{0007}".to_string();
+
+        let line = build_status_line(&model, now, GlyphMode::Ascii);
+        assert_eq!(line, "! open failed: launcher missing fail=0");
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\r'));
+        assert!(!line.contains('\t'));
     }
 
     #[test]

@@ -35,6 +35,25 @@ struct PollExecutionState {
     queued_refresh: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenCommandResult {
+    success: bool,
+    stderr: String,
+}
+
+fn run_open_command(command: &mut Command) -> OpenCommandResult {
+    match command.output() {
+        Ok(output) => OpenCommandResult {
+            success: output.status.success(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        },
+        Err(err) => OpenCommandResult {
+            success: false,
+            stderr: err.to_string(),
+        },
+    }
+}
+
 impl PollExecutionState {
     fn request_poll(&mut self) -> bool {
         if self.in_flight {
@@ -357,13 +376,14 @@ where
 fn open_url_in_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let ok = Command::new("open")
-            .arg(url)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if ok {
+        let mut cmd = Command::new("open");
+        cmd.arg(url);
+        let result = run_open_command(&mut cmd);
+        if result.success {
             return Ok(());
+        }
+        if !result.stderr.is_empty() {
+            tracing::debug!(url = %url, stderr = %result.stderr, "open command failed");
         }
 
         return Err(anyhow!("failed to open URL with open: {url}"));
@@ -382,14 +402,14 @@ fn open_url_in_browser(url: &str) -> Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        let ok = Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(url)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if ok {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", ""]).arg(url);
+        let result = run_open_command(&mut cmd);
+        if result.success {
             return Ok(());
+        }
+        if !result.stderr.is_empty() {
+            tracing::debug!(url = %url, stderr = %result.stderr, "start command failed");
         }
 
         return Err(anyhow!("failed to open URL with start: {url}"));
@@ -457,18 +477,31 @@ fn run_linux_open_backend(backend: LinuxOpenBackend, url: &str, browser_env: Opt
         LinuxOpenBackend::BrowserEnv => browser_env
             .and_then(|raw| browser_command_from_env(raw, url))
             .map(|(bin, args)| {
-                Command::new(bin)
-                    .args(args)
-                    .status()
-                    .map(|status| status.success())
-                    .unwrap_or(false)
+                let mut cmd = Command::new(&bin);
+                cmd.args(args);
+                let result = run_open_command(&mut cmd);
+                if !result.success && !result.stderr.is_empty() {
+                    tracing::debug!(
+                        command = %bin,
+                        stderr = %result.stderr,
+                        "linux browser open command failed"
+                    );
+                }
+                result.success
             })
             .unwrap_or(false),
-        LinuxOpenBackend::XdgOpen => Command::new("xdg-open")
-            .arg(url)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false),
+        LinuxOpenBackend::XdgOpen => {
+            let mut cmd = Command::new("xdg-open");
+            cmd.arg(url);
+            let result = run_open_command(&mut cmd);
+            if !result.success && !result.stderr.is_empty() {
+                tracing::debug!(
+                    stderr = %result.stderr,
+                    "linux xdg-open command failed"
+                );
+            }
+            result.success
+        }
     }
 }
 
@@ -1058,6 +1091,17 @@ mod tests {
 
         assert!(state.start_poll());
         assert!(state.in_flight());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_command_capture_collects_stderr_for_failed_process() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "printf 'launcher missing\\n' >&2; exit 1"]);
+
+        let result = super::run_open_command(&mut cmd);
+        assert!(!result.success);
+        assert_eq!(result.stderr, "launcher missing");
     }
 
     #[cfg(target_os = "linux")]

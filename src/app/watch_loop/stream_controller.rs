@@ -4,7 +4,7 @@ use ratatui::layout::Rect;
 
 use crate::{
     ports::{ClockPort, TimelineReadMarkPort},
-    ui::tui::{handle_input, parse_input, parse_mouse_input, ActiveTab, InputCommand, TuiModel},
+    ui::tui::{handle_input, parse_input, parse_mouse_input, InputCommand, TuiModel},
 };
 
 const ESC_DOUBLE_PRESS_WINDOW_MS: i64 = 1500;
@@ -85,7 +85,7 @@ where
                 | InputCommand::JumpBottom
                 | InputCommand::SelectIndex(_) => {
                     handle_input(model, cmd);
-                    if model.active_tab == ActiveTab::Timeline {
+                    if model.active_tab.supports_timeline_navigation() {
                         mark_selected_event_read(model, state, clock);
                     }
                     LoopControl::Redraw
@@ -100,7 +100,7 @@ where
                 | InputCommand::ScrollDown
                 | InputCommand::SelectIndex(_) => {
                     handle_input(model, cmd);
-                    if model.active_tab == ActiveTab::Timeline {
+                    if model.active_tab.supports_timeline_navigation() {
                         mark_selected_event_read(model, state, clock);
                     }
                     LoopControl::Redraw

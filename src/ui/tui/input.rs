@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 
 use super::{
     layout::{contains_point, timeline_inner_area},
-    model::{ActiveTab, TuiModel},
+    model::TuiModel,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub fn parse_input(key: KeyEvent) -> InputCommand {
 }
 
 pub fn parse_mouse_input(mouse: MouseEvent, terminal_area: Rect, model: &TuiModel) -> InputCommand {
-    if model.active_tab != ActiveTab::Timeline {
+    if !model.active_tab.supports_timeline_navigation() {
         return InputCommand::None;
     }
 
@@ -84,43 +84,43 @@ pub fn handle_input(model: &mut TuiModel, command: InputCommand) {
             model.help_visible = !model.help_visible;
         }
         InputCommand::NextTab => {
-            model.active_tab = model.active_tab.next();
+            model.set_active_tab(model.active_tab.next());
         }
         InputCommand::PrevTab => {
-            model.active_tab = model.active_tab.prev();
+            model.set_active_tab(model.active_tab.prev());
         }
         InputCommand::ScrollUp => {
-            if model.active_tab == ActiveTab::Timeline {
+            if model.active_tab.supports_timeline_navigation() {
                 model.selected = model.selected.saturating_sub(1);
             }
         }
         InputCommand::ScrollDown => {
-            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
+            if model.active_tab.supports_timeline_navigation() && !model.timeline.is_empty() {
                 model.selected = (model.selected + 1).min(model.timeline.len() - 1);
             }
         }
         InputCommand::PageUp => {
-            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
+            if model.active_tab.supports_timeline_navigation() && !model.timeline.is_empty() {
                 model.selected = model.selected.saturating_sub(model.page_size());
             }
         }
         InputCommand::PageDown => {
-            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
+            if model.active_tab.supports_timeline_navigation() && !model.timeline.is_empty() {
                 model.selected = (model.selected + model.page_size()).min(model.timeline.len() - 1);
             }
         }
         InputCommand::JumpTop => {
-            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
+            if model.active_tab.supports_timeline_navigation() && !model.timeline.is_empty() {
                 model.selected = 0;
             }
         }
         InputCommand::JumpBottom => {
-            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
+            if model.active_tab.supports_timeline_navigation() && !model.timeline.is_empty() {
                 model.selected = model.timeline.len() - 1;
             }
         }
         InputCommand::SelectIndex(index) => {
-            if model.active_tab == ActiveTab::Timeline && !model.timeline.is_empty() {
+            if model.active_tab.supports_timeline_navigation() && !model.timeline.is_empty() {
                 model.selected = index.min(model.timeline.len() - 1);
             }
         }
@@ -136,7 +136,7 @@ pub fn handle_input(model: &mut TuiModel, command: InputCommand) {
             | InputCommand::JumpTop
             | InputCommand::JumpBottom
             | InputCommand::SelectIndex(_)
-    ) && model.active_tab == ActiveTab::Timeline
+    ) && model.active_tab.supports_timeline_navigation()
     {
         model.sync_selected_event_key();
     }

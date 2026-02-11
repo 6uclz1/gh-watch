@@ -20,7 +20,8 @@ use super::{
     model::{ActiveTab, TuiModel},
     presentation::{
         build_keys_line, build_selected_lines, build_status_line, detect_glyph_mode_from_env,
-        timeline_constraints, timeline_empty_row, timeline_header, timeline_row,
+        timeline_constraints, timeline_empty_row, timeline_empty_row_with_message, timeline_header,
+        timeline_row,
     },
 };
 
@@ -68,7 +69,7 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
         .block(Block::default().borders(Borders::ALL).title("Stat"));
     frame.render_widget(header, layout.status);
 
-    let tab_titles = ["Timeline", "Repositories"]
+    let tab_titles = ["Timeline", "My PR", "Repositories"]
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
@@ -83,7 +84,17 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     frame.render_widget(tabs, layout.tabs);
 
     match model.active_tab {
-        ActiveTab::Timeline => render_timeline_panel(frame, model, layout.content),
+        ActiveTab::Timeline => {
+            render_timeline_panel(frame, model, layout.content, "Timeline", None)
+        }
+        ActiveTab::MyPr => {
+            let empty_message = if model.has_viewer_login() {
+                "No PR updates involving you"
+            } else {
+                "Viewer login unavailable"
+            };
+            render_timeline_panel(frame, model, layout.content, "My PR", Some(empty_message));
+        }
         ActiveTab::Repositories => render_repositories_panel(frame, model, layout.content),
     }
 
@@ -103,12 +114,18 @@ fn render(frame: &mut Frame<'_>, model: &mut TuiModel) {
     }
 }
 
-fn render_timeline_panel(frame: &mut Frame<'_>, model: &mut TuiModel, area: ratatui::layout::Rect) {
+fn render_timeline_panel(
+    frame: &mut Frame<'_>,
+    model: &mut TuiModel,
+    area: ratatui::layout::Rect,
+    title: &str,
+    empty_message: Option<&str>,
+) {
     let timeline_inner = shrink_by_border(area);
     model.timeline_page_size = (timeline_inner.height as usize).saturating_sub(1).max(1);
 
     let rows = if model.timeline.is_empty() {
-        vec![timeline_empty_row()]
+        vec![empty_message.map_or_else(timeline_empty_row, timeline_empty_row_with_message)]
     } else {
         model
             .timeline
@@ -119,7 +136,7 @@ fn render_timeline_panel(frame: &mut Frame<'_>, model: &mut TuiModel, area: rata
 
     let table = Table::new(rows, timeline_constraints())
         .header(timeline_header().style(Style::default().add_modifier(Modifier::BOLD)))
-        .block(Block::default().borders(Borders::ALL).title("Timeline"))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .row_highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol(">> ");
 
@@ -171,12 +188,12 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
         )]),
         Line::from("q: quit immediately"),
         Line::from("Esc twice within 1.5s: quit"),
-        Line::from("Tab / Shift+Tab: switch Timeline and Repositories"),
+        Line::from("Tab / Shift+Tab: switch Timeline, My PR and Repositories"),
         Line::from("r: refresh, ?: toggle help, enter: open selected URL"),
-        Line::from("up/down or j/k: move one row (Timeline tab)"),
-        Line::from("page up/page down: move one page (Timeline tab)"),
-        Line::from("g/home: top, G/end: bottom (Timeline tab)"),
-        Line::from("mouse: click to select, wheel to scroll (Timeline tab)"),
+        Line::from("up/down or j/k: move one row (Timeline/My PR tabs)"),
+        Line::from("page up/page down: move one page (Timeline/My PR tabs)"),
+        Line::from("g/home: top, G/end: bottom (Timeline/My PR tabs)"),
+        Line::from("mouse: click to select, wheel to scroll (Timeline/My PR tabs)"),
     ])
     .block(Block::default().borders(Borders::ALL).title("Help"))
     .wrap(Wrap { trim: true });

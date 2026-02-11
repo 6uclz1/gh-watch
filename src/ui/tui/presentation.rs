@@ -30,11 +30,15 @@ pub(crate) fn timeline_header() -> Row<'static> {
 }
 
 pub(crate) fn timeline_empty_row() -> Row<'static> {
+    timeline_empty_row_with_message("No events yet")
+}
+
+pub(crate) fn timeline_empty_row_with_message(message: &str) -> Row<'static> {
     Row::new(vec![
         Cell::from("-"),
         Cell::from("-"),
         Cell::from("-"),
-        Cell::from("No events yet"),
+        Cell::from(message.to_string()),
     ])
 }
 

@@ -40,6 +40,36 @@ fn ev_with(
     }
 }
 
+struct MyPrEventMeta<'a> {
+    actor: &'a str,
+    subject_author: Option<&'a str>,
+    requested_reviewer: Option<&'a str>,
+    mentions: &'a [&'a str],
+}
+
+fn ev_for_my_pr(
+    id: &str,
+    ts: chrono::DateTime<Utc>,
+    kind: EventKind,
+    title: &str,
+    url: &str,
+    meta: MyPrEventMeta<'_>,
+) -> WatchEvent {
+    WatchEvent {
+        event_id: id.to_string(),
+        repo: "acme/api".to_string(),
+        kind,
+        actor: meta.actor.to_string(),
+        title: title.to_string(),
+        url: url.to_string(),
+        created_at: ts,
+        source_item_id: id.to_string(),
+        subject_author: meta.subject_author.map(|s| s.to_string()),
+        requested_reviewer: meta.requested_reviewer.map(|s| s.to_string()),
+        mentions: meta.mentions.iter().map(|m| m.to_string()).collect(),
+    }
+}
+
 #[test]
 fn timeline_keeps_newest_first() {
     let mut model = TuiModel::new(10);
@@ -172,9 +202,12 @@ fn help_toggle_switches_visibility() {
 }
 
 #[test]
-fn tab_switch_cycles_between_timeline_and_repositories() {
+fn tab_switch_cycles_between_timeline_my_pr_and_repositories() {
     let mut model = TuiModel::new(10);
     assert_eq!(model.active_tab, ActiveTab::Timeline);
+
+    handle_input(&mut model, InputCommand::NextTab);
+    assert_eq!(model.active_tab, ActiveTab::MyPr);
 
     handle_input(&mut model, InputCommand::NextTab);
     assert_eq!(model.active_tab, ActiveTab::Repositories);
@@ -184,6 +217,9 @@ fn tab_switch_cycles_between_timeline_and_repositories() {
 
     handle_input(&mut model, InputCommand::PrevTab);
     assert_eq!(model.active_tab, ActiveTab::Repositories);
+
+    handle_input(&mut model, InputCommand::PrevTab);
+    assert_eq!(model.active_tab, ActiveTab::MyPr);
 }
 
 #[test]
@@ -276,6 +312,163 @@ fn non_timeline_tab_ignores_timeline_navigation_input() {
 
     handle_input(&mut model, InputCommand::ScrollDown);
     assert_eq!(model.selected, 0);
+}
+
+#[test]
+fn my_pr_tab_filters_with_only_involving_me_semantics_and_pr_only() {
+    let mut model = TuiModel::new(20);
+    model.set_viewer_login(Some("alice".to_string()));
+    model.push_timeline(vec![
+        ev_for_my_pr(
+            "requested",
+            Utc.with_ymd_and_hms(2025, 1, 6, 0, 0, 0).unwrap(),
+            EventKind::PrReviewRequested,
+            "review requested",
+            "https://example.com/pull/10",
+            MyPrEventMeta {
+                actor: "bob",
+                subject_author: Some("bob"),
+                requested_reviewer: Some("alice"),
+                mentions: &[],
+            },
+        ),
+        ev_for_my_pr(
+            "mentioned",
+            Utc.with_ymd_and_hms(2025, 1, 5, 0, 0, 0).unwrap(),
+            EventKind::IssueCommentCreated,
+            "ping @alice",
+            "https://example.com/pull/10#issuecomment-1",
+            MyPrEventMeta {
+                actor: "carol",
+                subject_author: Some("bob"),
+                requested_reviewer: None,
+                mentions: &["alice"],
+            },
+        ),
+        ev_for_my_pr(
+            "authored_pr_update",
+            Utc.with_ymd_and_hms(2025, 1, 4, 0, 0, 0).unwrap(),
+            EventKind::IssueCommentCreated,
+            "update on authored pr",
+            "https://example.com/pull/11#issuecomment-2",
+            MyPrEventMeta {
+                actor: "dave",
+                subject_author: Some("alice"),
+                requested_reviewer: None,
+                mentions: &[],
+            },
+        ),
+        ev_for_my_pr(
+            "issue_created",
+            Utc.with_ymd_and_hms(2025, 1, 3, 0, 0, 0).unwrap(),
+            EventKind::IssueCreated,
+            "issue created by me",
+            "https://example.com/issues/9",
+            MyPrEventMeta {
+                actor: "alice",
+                subject_author: Some("alice"),
+                requested_reviewer: None,
+                mentions: &[],
+            },
+        ),
+        ev_for_my_pr(
+            "issue_comment_non_pr",
+            Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap(),
+            EventKind::IssueCommentCreated,
+            "plain issue comment",
+            "https://example.com/issues/10#issuecomment-1",
+            MyPrEventMeta {
+                actor: "erin",
+                subject_author: Some("alice"),
+                requested_reviewer: None,
+                mentions: &[],
+            },
+        ),
+    ]);
+
+    handle_input(&mut model, InputCommand::NextTab);
+
+    assert_eq!(model.active_tab, ActiveTab::MyPr);
+    let ids = model
+        .timeline
+        .iter()
+        .map(|event| event.event_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["requested", "mentioned", "authored_pr_update"]);
+}
+
+#[test]
+fn my_pr_tab_is_empty_when_viewer_login_is_unavailable() {
+    let mut model = TuiModel::new(20);
+    model.push_timeline(vec![ev_for_my_pr(
+        "requested",
+        Utc.with_ymd_and_hms(2025, 1, 6, 0, 0, 0).unwrap(),
+        EventKind::PrReviewRequested,
+        "review requested",
+        "https://example.com/pull/10",
+        MyPrEventMeta {
+            actor: "bob",
+            subject_author: Some("bob"),
+            requested_reviewer: Some("alice"),
+            mentions: &[],
+        },
+    )]);
+
+    handle_input(&mut model, InputCommand::NextTab);
+
+    assert_eq!(model.active_tab, ActiveTab::MyPr);
+    assert!(model.timeline.is_empty());
+}
+
+#[test]
+fn my_pr_tab_accepts_timeline_navigation_and_mouse() {
+    let mut model = TuiModel::new(20);
+    model.set_viewer_login(Some("alice".to_string()));
+    model.push_timeline(vec![
+        ev_for_my_pr(
+            "a",
+            Utc.with_ymd_and_hms(2025, 1, 6, 0, 0, 0).unwrap(),
+            EventKind::PrReviewRequested,
+            "a",
+            "https://example.com/pull/1",
+            MyPrEventMeta {
+                actor: "bob",
+                subject_author: Some("bob"),
+                requested_reviewer: Some("alice"),
+                mentions: &[],
+            },
+        ),
+        ev_for_my_pr(
+            "b",
+            Utc.with_ymd_and_hms(2025, 1, 5, 0, 0, 0).unwrap(),
+            EventKind::PrReviewRequested,
+            "b",
+            "https://example.com/pull/2",
+            MyPrEventMeta {
+                actor: "carol",
+                subject_author: Some("carol"),
+                requested_reviewer: Some("alice"),
+                mentions: &[],
+            },
+        ),
+    ]);
+    handle_input(&mut model, InputCommand::NextTab);
+    assert_eq!(model.active_tab, ActiveTab::MyPr);
+
+    handle_input(&mut model, InputCommand::ScrollDown);
+    assert_eq!(model.selected, 1);
+
+    model.timeline_offset = 0;
+    let area = Rect::new(0, 0, 100, 30);
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 2,
+        row: 9,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    let cmd = parse_mouse_input(click, area, &model);
+    assert_eq!(cmd, InputCommand::SelectIndex(1));
 }
 
 #[test]

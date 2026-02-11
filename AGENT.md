@@ -18,7 +18,7 @@
 ### `watch` の挙動
 - 起動時に `gh auth status` を検証し、失敗時は即終了
 - TUIを表示しつつ監視ループを実行
-- 主なキー操作: `q` 終了 / `Esc` 1.5秒以内に2回で終了 / `r` 手動更新 / `Tab` タブ切替 / `↑↓` スクロール（Timelineタブ）
+- 主なキー操作: `q` 終了 / `Esc` 1.5秒以内に2回で終了 / `r` 手動更新 / `Tab` タブ切替 / `↑↓` スクロール（Timeline/My PRタブ）
 
 ### `check` の挙動
 - 設定ファイル読み込み
@@ -102,8 +102,9 @@
 
 ## TUI仕様（実装済み）
 - Header: status / loading / next poll / failures / watching summary
-- Main: `Timeline` / `Repositories` の2タブ（`Tab` / `Shift+Tab` で切替）
+- Main: `Timeline` / `My PR` / `Repositories` の3タブ（`Tab` / `Shift+Tab` で切替）
 - Timelineタブ: タイムライン（新着順、選択可能、幅に応じて列縮小）
+- My PRタブ: 通知フィルタ準拠（`only_involving_me` 相当）かつPR関連のみを抽出したタイムライン
 - Repositoriesタブ: enabled=true の監視対象repo一覧（閲覧専用）
 - Footer: Selected詳細 + キーガイド（Esc二度押し終了を表示）
 

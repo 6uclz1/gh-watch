@@ -165,14 +165,14 @@ Add-Content -Path $PROFILE -Value '. "$HOME/.gh-watch.ps1"'
 - `q`: 終了
 - `Esc` を1.5秒以内に2回: 終了
 - `r`: 手動更新
-- `Tab` / `Shift+Tab`: `Timeline` / `Repositories` タブ切替
+- `Tab` / `Shift+Tab`: `Timeline` / `My PR` / `Repositories` タブ切替
 - `?`: ヘルプ表示切替
 - `Enter`: 選択URLを開く（WSLでは `$BROWSER` を優先し、失敗/未設定時は `xdg-open` にフォールバック）
-- `↑` / `↓` or `j` / `k`: 1件移動（Timelineタブ）
-- `PageUp` / `PageDown`: 1ページ移動（Timelineタブ）
-- `g` / `Home`: 先頭（Timelineタブ）
-- `G` / `End`: 末尾（Timelineタブ）
-- マウスクリック/ホイール: 選択/スクロール（Timelineタブ）
+- `↑` / `↓` or `j` / `k`: 1件移動（Timeline/My PRタブ）
+- `PageUp` / `PageDown`: 1ページ移動（Timeline/My PRタブ）
+- `g` / `Home`: 先頭（Timeline/My PRタブ）
+- `G` / `End`: 末尾（Timeline/My PRタブ）
+- マウスクリック/ホイール: 選択/スクロール（Timeline/My PRタブ）
 - タイムライン未読マーカー: `*` は未読、空白は既読
 - 既読化タイミング: 選択移動時または `Enter` でURLを開いたとき（再起動後も保持）
 

@@ -40,6 +40,17 @@ where
 {
     let mut ui = TerminalUi::new()?;
     let mut model = TuiModel::new(config.timeline_limit);
+    let viewer_login = match gh.viewer_login().await {
+        Ok(login) => Some(login),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "failed to resolve viewer login; My PR tab will remain empty"
+            );
+            None
+        }
+    };
+    model.set_viewer_login(viewer_login);
     model.watched_repositories = enabled_repository_names(config);
     let timeline = state.load_timeline_events(config.timeline_limit)?;
     let timeline_keys = timeline

@@ -167,14 +167,14 @@ Global filter keys:
 - `q`: quit
 - `Esc` twice within 1.5 seconds: quit
 - `r`: refresh now
-- `Tab` / `Shift+Tab`: switch `Timeline` and `Repositories` tabs
+- `Tab` / `Shift+Tab`: switch `Timeline`, `My PR`, and `Repositories` tabs
 - `?`: toggle help
 - `Enter`: open selected URL (on WSL, tries `$BROWSER` first, then falls back to `xdg-open`)
-- `↑` / `↓` or `j` / `k`: move one item (Timeline tab)
-- `PageUp` / `PageDown`: move one page (Timeline tab)
-- `g` / `Home`: top (Timeline tab)
-- `G` / `End`: bottom (Timeline tab)
-- Mouse click/wheel in timeline: select/scroll (Timeline tab)
+- `↑` / `↓` or `j` / `k`: move one item (Timeline/My PR tabs)
+- `PageUp` / `PageDown`: move one page (Timeline/My PR tabs)
+- `g` / `Home`: top (Timeline/My PR tabs)
+- `G` / `End`: bottom (Timeline/My PR tabs)
+- Mouse click/wheel in timeline table: select/scroll (Timeline/My PR tabs)
 - Timeline unread marker: `*` means unread, blank means read
 - Read timing: selected by navigation or opened with `Enter` (persisted across restarts)
 

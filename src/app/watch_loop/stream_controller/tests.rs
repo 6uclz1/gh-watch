@@ -11,7 +11,7 @@ use super::{handle_stream_event, LoopControl};
 use crate::{
     domain::events::{EventKind, WatchEvent},
     ports::{ClockPort, TimelineReadMarkPort},
-    ui::tui::TuiModel,
+    ui::tui::{ActiveTab, TuiModel},
 };
 
 #[derive(Clone, Default)]
@@ -198,4 +198,35 @@ fn read_mark_failure_keeps_event_unread_and_sets_status() {
         .status_line
         .contains("read mark failed: state store down"));
     assert!(!model.is_event_read(&model.timeline[1].event_key()));
+}
+
+#[test]
+fn navigation_on_my_pr_tab_marks_selected_event_as_read() {
+    let state = FakeState::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 9, 2, 0, 0).unwrap(),
+    };
+    let mut model = TuiModel::new(10);
+    model.active_tab = ActiveTab::MyPr;
+    model.timeline = vec![
+        timeline_event("ev-mypr-1", clock.now),
+        timeline_event("ev-mypr-2", clock.now),
+    ];
+
+    let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+    let control = handle_stream_event(
+        Some(Ok(Event::Key(key))),
+        &mut model,
+        &state,
+        &clock,
+        test_area(),
+        &open_ok,
+    );
+
+    assert_eq!(control, LoopControl::Redraw);
+    assert_eq!(model.selected, 1);
+    assert_eq!(
+        state.marked_read_event_keys(),
+        vec![model.timeline[1].event_key()]
+    );
 }

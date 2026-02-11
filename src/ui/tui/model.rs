@@ -2,18 +2,23 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 
-use crate::domain::{events::WatchEvent, failure::FailureRecord};
+use crate::domain::{
+    events::{event_matches_notification_filters, EventKind, WatchEvent},
+    failure::FailureRecord,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
     Timeline,
+    MyPr,
     Repositories,
 }
 
 impl ActiveTab {
     pub(crate) fn next(self) -> Self {
         match self {
-            Self::Timeline => Self::Repositories,
+            Self::Timeline => Self::MyPr,
+            Self::MyPr => Self::Repositories,
             Self::Repositories => Self::Timeline,
         }
     }
@@ -21,15 +26,21 @@ impl ActiveTab {
     pub(crate) fn prev(self) -> Self {
         match self {
             Self::Timeline => Self::Repositories,
-            Self::Repositories => Self::Timeline,
+            Self::MyPr => Self::Timeline,
+            Self::Repositories => Self::MyPr,
         }
     }
 
     pub(crate) fn index(self) -> usize {
         match self {
             Self::Timeline => 0,
-            Self::Repositories => 1,
+            Self::MyPr => 1,
+            Self::Repositories => 2,
         }
+    }
+
+    pub(crate) fn supports_timeline_navigation(self) -> bool {
+        matches!(self, Self::Timeline | Self::MyPr)
     }
 }
 
@@ -55,6 +66,7 @@ pub struct TuiModel {
     pub active_tab: ActiveTab,
     pub esc_armed_until: Option<DateTime<Utc>>,
     limit: usize,
+    viewer_login: Option<String>,
 }
 
 impl TuiModel {
@@ -80,6 +92,7 @@ impl TuiModel {
             active_tab: ActiveTab::Timeline,
             esc_armed_until: None,
             limit,
+            viewer_login: None,
         }
     }
 
@@ -100,6 +113,33 @@ impl TuiModel {
 
     pub fn replace_read_event_keys(&mut self, read_event_keys: HashSet<String>) {
         self.read_event_keys = read_event_keys;
+    }
+
+    pub fn set_viewer_login(&mut self, viewer_login: Option<String>) {
+        self.viewer_login = viewer_login.and_then(|login| {
+            let trimmed = login.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        let previous_selected_key = self.snapshot_selected_key();
+        self.rebuild_timeline(previous_selected_key);
+    }
+
+    pub fn set_active_tab(&mut self, active_tab: ActiveTab) {
+        if self.active_tab == active_tab {
+            return;
+        }
+
+        self.active_tab = active_tab;
+        let previous_selected_key = self.snapshot_selected_key();
+        self.rebuild_timeline(previous_selected_key);
+    }
+
+    pub fn has_viewer_login(&self) -> bool {
+        self.viewer_login.is_some()
     }
 
     pub(crate) fn mark_event_read(&mut self, event_key: &str) {
@@ -125,8 +165,26 @@ impl TuiModel {
     }
 
     fn rebuild_timeline(&mut self, previous_selected_key: Option<String>) {
-        self.timeline = self.timeline_all.clone();
+        self.timeline = match self.active_tab {
+            ActiveTab::Timeline | ActiveTab::Repositories => self.timeline_all.clone(),
+            ActiveTab::MyPr => self.filtered_my_pr_timeline(),
+        };
         self.restore_selection(previous_selected_key);
+    }
+
+    fn filtered_my_pr_timeline(&self) -> Vec<WatchEvent> {
+        let Some(viewer_login) = self.viewer_login.as_deref() else {
+            return Vec::new();
+        };
+
+        self.timeline_all
+            .iter()
+            .filter(|event| is_pr_related_for_my_pr_tab(event))
+            .filter(|event| {
+                event_matches_notification_filters(event, &[], &[], true, Some(viewer_login))
+            })
+            .cloned()
+            .collect()
     }
 
     fn restore_selection(&mut self, previous_selected_key: Option<String>) {
@@ -157,4 +215,20 @@ impl TuiModel {
     pub(crate) fn page_size(&self) -> usize {
         self.timeline_page_size.max(1)
     }
+}
+
+fn is_pr_related_for_my_pr_tab(event: &WatchEvent) -> bool {
+    match event.kind {
+        EventKind::PrCreated
+        | EventKind::PrReviewCommentCreated
+        | EventKind::PrReviewRequested
+        | EventKind::PrReviewSubmitted
+        | EventKind::PrMerged => true,
+        EventKind::IssueCreated => false,
+        EventKind::IssueCommentCreated => issue_comment_targets_pr(event),
+    }
+}
+
+fn issue_comment_targets_pr(event: &WatchEvent) -> bool {
+    event.url.contains("/pull/") || event.url.contains("/pulls/")
 }

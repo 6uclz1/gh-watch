@@ -1,6 +1,9 @@
-use chrono::TimeZone;
+use chrono::{FixedOffset, TimeZone};
 
-use super::{build_selected_lines, build_status_line, detect_glyph_mode, truncate_tail, GlyphMode};
+use super::{
+    build_selected_lines, build_status_line, detect_glyph_mode, format_compact_status_time,
+    format_time_in_timezone, truncate_tail, GlyphMode,
+};
 use crate::{
     domain::events::{EventKind, WatchEvent},
     ui::tui::TuiModel,
@@ -58,4 +61,36 @@ fn glyph_mode_uses_ascii_for_dumb_term() {
         Some("en_US.UTF-8"),
     );
     assert_eq!(mode, GlyphMode::Ascii);
+}
+
+#[test]
+fn timeline_time_equivalent_processing_uses_timezone_offset() {
+    let utc = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+    let jst = FixedOffset::east_opt(9 * 60 * 60).unwrap();
+
+    let formatted = format_time_in_timezone(utc, &jst, "%m-%d %H:%M:%S");
+    assert_eq!(formatted, "01-01 09:00:00");
+}
+
+#[test]
+fn compact_status_time_equivalent_processing_uses_timezone_offset() {
+    let utc = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+    let jst = FixedOffset::east_opt(9 * 60 * 60).unwrap();
+
+    let formatted = format_time_in_timezone(utc, &jst, "%m-%d %H:%M");
+    assert_eq!(formatted, "01-01 09:00");
+}
+
+#[test]
+fn timeline_time_equivalent_processing_rolls_to_previous_day_for_negative_offset() {
+    let utc = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 1, 0, 0).unwrap();
+    let pst = FixedOffset::west_opt(8 * 60 * 60).unwrap();
+
+    let formatted = format_time_in_timezone(utc, &pst, "%m-%d %H:%M:%S");
+    assert_eq!(formatted, "12-31 17:00:00");
+}
+
+#[test]
+fn compact_status_time_none_is_dash() {
+    assert_eq!(format_compact_status_time(None), "-");
 }

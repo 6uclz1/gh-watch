@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use ratatui::{
     layout::Constraint,
     style::{Color, Style},
@@ -179,7 +179,15 @@ pub(crate) fn detect_glyph_mode_from_env() -> GlyphMode {
 }
 
 fn format_timeline_time(dt: DateTime<Utc>) -> String {
-    dt.format("%m-%d %H:%M:%S").to_string()
+    format_time_in_timezone(dt, &Local, "%m-%d %H:%M:%S")
+}
+
+fn format_time_in_timezone<Tz>(dt: DateTime<Utc>, timezone: &Tz, pattern: &str) -> String
+where
+    Tz: TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    dt.with_timezone(timezone).format(pattern).to_string()
 }
 
 fn event_kind_label(kind: &EventKind) -> &'static str {
@@ -260,7 +268,7 @@ fn sanitize_single_line(raw: &str) -> String {
 }
 
 fn format_compact_status_time(dt: Option<DateTime<Utc>>) -> String {
-    dt.map(|d| d.format("%m-%d %H:%M").to_string())
+    dt.map(|d| format_time_in_timezone(d, &Local, "%m-%d %H:%M"))
         .unwrap_or_else(|| "-".to_string())
 }
 

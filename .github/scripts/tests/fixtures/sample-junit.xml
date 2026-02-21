@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="suite-one" tests="3">
+    <testcase classname="crate::mod_b" name="test_zeta" />
+    <testcase classname="crate::mod_a" name="test_alpha">
+      <failure message="assertion failed">boom</failure>
+    </testcase>
+    <testcase classname="crate::mod_a" name="test_skip">
+      <skipped message="ignored" />
+    </testcase>
+  </testsuite>
+  <testsuite name="suite-two" tests="2">
+    <testsuite name="nested-suite" tests="2">
+      <testcase name="test_no_class" />
+      <testcase classname="crate::mod_c" name="test_error">
+        <error message="panic">panic payload</error>
+      </testcase>
+    </testsuite>
+  </testsuite>
+</testsuites>

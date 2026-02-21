@@ -48,6 +48,13 @@ jobs:
             --no-fail-fast \
             --profile ci
 
+      - name: Add test items summary to job summary
+        if: always()
+        run: |
+          python3 .github/scripts/junit_test_items_summary.py \
+            --junit-path target/nextest/ci/junit.xml \
+            --summary-path "$GITHUB_STEP_SUMMARY"
+
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v4

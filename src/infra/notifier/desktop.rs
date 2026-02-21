@@ -7,13 +7,6 @@ use crate::{
     },
 };
 
-use super::{
-    backend::DesktopBackendKind,
-    message::{
-        build_notification_body_from_payload, build_notification_title_from_payload,
-        dispatch_result,
-    },
-};
 #[cfg(target_os = "linux")]
 use super::backend::detect_linux_backend;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -22,6 +15,13 @@ use super::backend::NON_MACOS_NOOP_WARNING;
 use super::macos_osascript::{check_osascript_available, notify_via_osascript};
 #[cfg(target_os = "linux")]
 use super::wsl_burnttoast::notify_via_burnttoast;
+use super::{
+    backend::DesktopBackendKind,
+    message::{
+        build_notification_body_from_payload, build_notification_title_from_payload,
+        dispatch_result,
+    },
+};
 
 #[derive(Debug, Clone)]
 pub struct DesktopNotifier {

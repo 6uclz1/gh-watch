@@ -54,10 +54,7 @@ pub(super) fn build_notification_body_from_payload(
     }
 }
 
-pub(super) fn dispatch_result(
-    include_url: bool,
-    click_action: bool,
-) -> NotificationDispatchResult {
+pub(super) fn dispatch_result(include_url: bool, click_action: bool) -> NotificationDispatchResult {
     if click_action {
         NotificationDispatchResult::DeliveredWithClickAction
     } else if include_url {
@@ -76,9 +73,7 @@ mod tests {
         build_notification_title_from_payload, dispatch_result,
     };
     use crate::domain::events::{EventKind, WatchEvent};
-    use crate::ports::{
-        NotificationDigest, NotificationDispatchResult, NotificationPayload,
-    };
+    use crate::ports::{NotificationDigest, NotificationDispatchResult, NotificationPayload};
 
     fn sample_event() -> WatchEvent {
         WatchEvent {

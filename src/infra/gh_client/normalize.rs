@@ -39,6 +39,12 @@ pub(super) fn normalize_events_from_items(
     review_comments: Vec<GhComment>,
 ) -> Vec<WatchEvent> {
     let mut events = Vec::new();
+    let draft_pull_numbers = pulls
+        .iter()
+        .filter(|pr| pr.draft)
+        .map(GhPull::number_or_id)
+        .collect::<HashSet<_>>();
+
     let pull_author_by_number = pulls
         .iter()
         .filter_map(|pr| {
@@ -58,27 +64,35 @@ pub(super) fn normalize_events_from_items(
         })
         .collect::<HashMap<_, _>>();
 
-    events.extend(pulls.iter().filter(|pr| pr.created_at > since).map(|pr| {
-        let actor = user_login_or_unknown(pr.user.as_ref());
-        WatchEvent {
-            event_id: format!("pr:{}", pr.id),
-            repo: repo.to_string(),
-            kind: EventKind::PrCreated,
-            actor: actor.clone(),
-            title: pr.title.clone(),
-            url: pr.html_url.clone(),
-            created_at: pr.created_at,
-            source_item_id: pr.id.to_string(),
-            subject_author: Some(actor),
-            requested_reviewer: None,
-            mentions: extract_mentions(&pr.title),
-        }
-    }));
+    events.extend(
+        pulls
+            .iter()
+            .filter(|pr| !pr.draft && pr.created_at > since)
+            .map(|pr| {
+                let actor = user_login_or_unknown(pr.user.as_ref());
+                WatchEvent {
+                    event_id: format!("pr:{}", pr.id),
+                    repo: repo.to_string(),
+                    kind: EventKind::PrCreated,
+                    actor: actor.clone(),
+                    title: pr.title.clone(),
+                    url: pr.html_url.clone(),
+                    created_at: pr.created_at,
+                    source_item_id: pr.id.to_string(),
+                    subject_author: Some(actor),
+                    requested_reviewer: None,
+                    mentions: extract_mentions(&pr.title),
+                }
+            }),
+    );
 
     events.extend(
         pulls
             .iter()
             .filter_map(|pr| {
+                if pr.draft {
+                    return None;
+                }
                 let updated_at = pr.updated_at.unwrap_or(pr.created_at);
                 if updated_at <= since {
                     return None;
@@ -111,6 +125,9 @@ pub(super) fn normalize_events_from_items(
     );
 
     for pr in &pulls {
+        if pr.draft {
+            continue;
+        }
         let updated_at = pr.updated_at.unwrap_or(pr.created_at);
         if updated_at <= since {
             continue;
@@ -160,6 +177,9 @@ pub(super) fn normalize_events_from_items(
         issue_comments
             .iter()
             .filter(|comment| comment.created_at > since)
+            .filter(|comment| {
+                !references_draft_pull(comment.issue_url.as_deref(), &draft_pull_numbers)
+            })
             .map(|comment| {
                 let body = comment.body.clone().unwrap_or_default();
                 let subject_author = comment
@@ -192,6 +212,9 @@ pub(super) fn normalize_events_from_items(
     for comment in review_comments
         .iter()
         .filter(|comment| comment.created_at > since)
+        .filter(|comment| {
+            !references_draft_pull(comment.pull_request_url.as_deref(), &draft_pull_numbers)
+        })
     {
         let body = comment.body.clone().unwrap_or_default();
         let subject_author = comment
@@ -277,6 +300,11 @@ fn parse_number_from_url(url: &str) -> Option<i64> {
     let tail = url.rsplit('/').next()?;
     let tail = tail.split('?').next().unwrap_or(tail);
     tail.parse::<i64>().ok()
+}
+
+fn references_draft_pull(url: Option<&str>, draft_pull_numbers: &HashSet<i64>) -> bool {
+    url.and_then(parse_number_from_url)
+        .is_some_and(|number| draft_pull_numbers.contains(&number))
 }
 
 fn extract_mentions(text: &str) -> Vec<String> {

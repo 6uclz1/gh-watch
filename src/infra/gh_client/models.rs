@@ -10,6 +10,8 @@ pub(super) struct GhUser {
 pub(super) struct GhPull {
     pub(super) id: i64,
     pub(super) number: Option<i64>,
+    #[serde(default)]
+    pub(super) draft: bool,
     pub(super) title: String,
     pub(super) html_url: String,
     pub(super) created_at: DateTime<Utc>,

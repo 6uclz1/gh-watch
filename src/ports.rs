@@ -68,10 +68,26 @@ pub enum NotificationDispatchResult {
     DeliveredWithBodyUrlFallback,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationDigest {
+    pub total_events: usize,
+    pub sample_events: Vec<WatchEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationPayload {
+    Event(WatchEvent),
+    Digest(NotificationDigest),
+}
+
 pub trait NotifierPort: Send + Sync {
     fn check_health(&self) -> Result<()>;
     fn click_action_support(&self) -> NotificationClickSupport;
-    fn notify(&self, event: &WatchEvent, include_url: bool) -> Result<NotificationDispatchResult>;
+    fn notify(
+        &self,
+        payload: &NotificationPayload,
+        include_url: bool,
+    ) -> Result<NotificationDispatchResult>;
 }
 
 pub trait ClockPort: Send + Sync {

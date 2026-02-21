@@ -2,8 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use gh_watch::app::notification_test::run_notification_test;
-use gh_watch::domain::events::WatchEvent;
-use gh_watch::ports::{NotificationClickSupport, NotificationDispatchResult, NotifierPort};
+use gh_watch::ports::{
+    NotificationClickSupport, NotificationDispatchResult, NotificationPayload, NotifierPort,
+};
 
 #[derive(Clone)]
 enum NotifyOutcome {
@@ -13,7 +14,7 @@ enum NotifyOutcome {
 
 #[derive(Clone)]
 struct FakeNotifier {
-    calls: Arc<Mutex<Vec<(WatchEvent, bool)>>>,
+    calls: Arc<Mutex<Vec<(NotificationPayload, bool)>>>,
     outcome: NotifyOutcome,
 }
 
@@ -42,11 +43,15 @@ impl NotifierPort for FakeNotifier {
         NotificationClickSupport::Unsupported
     }
 
-    fn notify(&self, event: &WatchEvent, include_url: bool) -> Result<NotificationDispatchResult> {
+    fn notify(
+        &self,
+        payload: &NotificationPayload,
+        include_url: bool,
+    ) -> Result<NotificationDispatchResult> {
         self.calls
             .lock()
             .unwrap()
-            .push((event.clone(), include_url));
+            .push((payload.clone(), include_url));
         match &self.outcome {
             NotifyOutcome::Success(result) => Ok(*result),
             NotifyOutcome::Failure(message) => Err(anyhow!("{message}")),
@@ -67,7 +72,10 @@ fn notification_test_runs_notify_once_with_include_url_enabled() {
         outcome.dispatch_result,
         NotificationDispatchResult::Delivered
     );
-    assert_eq!(outcome.event_key, calls[0].0.event_key());
+    match &calls[0].0 {
+        NotificationPayload::Event(event) => assert_eq!(outcome.event_key, event.event_key()),
+        NotificationPayload::Digest(_) => panic!("notification test should send an event payload"),
+    }
 }
 
 #[test]

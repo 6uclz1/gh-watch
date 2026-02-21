@@ -123,6 +123,7 @@ Add-Content -Path $PROFILE -Value '. "$HOME/.gh-watch.ps1"'
 
 - `0`: success
 - `1`: any failure
+- In text mode output, `notified` means the number of dispatched desktop notifications (not the number of matched events).
 
 ## Events
 
@@ -158,6 +159,7 @@ Global filter keys:
 - Each repository fetch retries up to 3 attempts (backoff: 1s, then 2s).
 - Per-repository cursor is updated to poll start time (not post-processing `now`).
 - New events are durably persisted first, then notified immediately in the same poll cycle.
+- When a poll has 2+ newly logged events, desktop notification dispatch is collapsed into one digest notification.
 - `event_key` deduplicates overlap re-fetches and prevents re-notifying already logged events.
 - Repository fetch failures are treated as partial failures: successful repositories still complete.
 - If all repositories fail to fetch in a cycle, that cycle fails.

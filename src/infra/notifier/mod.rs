@@ -8,7 +8,10 @@ use anyhow::{anyhow, Context};
 use crate::{
     config::NotificationConfig,
     domain::events::WatchEvent,
-    ports::{NotificationClickSupport, NotificationDispatchResult, NotifierPort},
+    ports::{
+        NotificationClickSupport, NotificationDigest, NotificationDispatchResult,
+        NotificationPayload, NotifierPort,
+    },
 };
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -36,6 +39,45 @@ pub fn build_notification_body(event: &WatchEvent, include_url: bool) -> String 
 
 fn build_notification_title(event: &WatchEvent) -> String {
     format!("{} [{}]", event.repo, event.kind)
+}
+
+fn build_digest_notification_body(digest: &NotificationDigest, include_url: bool) -> String {
+    let mut lines = vec![format!("{} updates", digest.total_events)];
+    for event in &digest.sample_events {
+        lines.push(format!(
+            "- {} [{}] {} by @{}",
+            event.repo, event.kind, event.title, event.actor
+        ));
+        if include_url {
+            lines.push(event.url.clone());
+        }
+    }
+
+    let remaining = digest
+        .total_events
+        .saturating_sub(digest.sample_events.len());
+    if remaining > 0 {
+        lines.push(format!("... and {remaining} more"));
+    }
+
+    lines.join("\n")
+}
+
+fn build_notification_title_from_payload(payload: &NotificationPayload) -> String {
+    match payload {
+        NotificationPayload::Event(event) => build_notification_title(event),
+        NotificationPayload::Digest(_) => "gh-watch [digest]".to_string(),
+    }
+}
+
+fn build_notification_body_from_payload(
+    payload: &NotificationPayload,
+    include_url: bool,
+) -> String {
+    match payload {
+        NotificationPayload::Event(event) => build_notification_body(event, include_url),
+        NotificationPayload::Digest(digest) => build_digest_notification_body(digest, include_url),
+    }
 }
 
 fn dispatch_result(include_url: bool, click_action: bool) -> NotificationDispatchResult {
@@ -140,9 +182,13 @@ impl NotifierPort for DesktopNotifier {
         }
     }
 
-    fn notify(&self, event: &WatchEvent, include_url: bool) -> Result<NotificationDispatchResult> {
-        let title = build_notification_title(event);
-        let body = build_notification_body(event, include_url);
+    fn notify(
+        &self,
+        payload: &NotificationPayload,
+        include_url: bool,
+    ) -> Result<NotificationDispatchResult> {
+        let title = build_notification_title_from_payload(payload);
+        let body = build_notification_body_from_payload(payload, include_url);
 
         match self.backend {
             DesktopBackendKind::MacOs => {
@@ -190,7 +236,7 @@ impl NotifierPort for NoopNotifier {
 
     fn notify(
         &self,
-        _event: &WatchEvent,
+        _payload: &NotificationPayload,
         _include_url: bool,
     ) -> Result<NotificationDispatchResult> {
         Ok(NotificationDispatchResult::Delivered)
@@ -383,13 +429,17 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::{
-        build_notification_body, is_wsl_from_inputs, select_linux_backend, DesktopBackendKind,
-        DesktopNotifier,
+        build_digest_notification_body, build_notification_body,
+        build_notification_title_from_payload, is_wsl_from_inputs, select_linux_backend,
+        DesktopBackendKind, DesktopNotifier,
     };
     #[cfg(target_os = "macos")]
     use crate::config::NotificationConfig;
     use crate::domain::events::{EventKind, WatchEvent};
-    use crate::ports::{NotificationClickSupport, NotificationDispatchResult, NotifierPort};
+    use crate::ports::{
+        NotificationClickSupport, NotificationDigest, NotificationDispatchResult,
+        NotificationPayload, NotifierPort,
+    };
 
     fn sample_event() -> WatchEvent {
         WatchEvent {
@@ -407,10 +457,63 @@ mod tests {
         }
     }
 
+    fn sample_digest(total_events: usize, sample_events: Vec<WatchEvent>) -> NotificationDigest {
+        NotificationDigest {
+            total_events,
+            sample_events,
+        }
+    }
+
     #[test]
     fn notification_body_contains_url_when_requested() {
         let body = build_notification_body(&sample_event(), true);
         assert!(body.contains("https://example.com/pr/1"));
+    }
+
+    #[test]
+    fn digest_notification_title_is_fixed() {
+        let payload = NotificationPayload::Digest(sample_digest(2, vec![sample_event()]));
+        assert_eq!(
+            build_notification_title_from_payload(&payload),
+            "gh-watch [digest]"
+        );
+    }
+
+    #[test]
+    fn digest_notification_body_contains_total_samples_and_remaining_count() {
+        let first = WatchEvent {
+            title: "One".to_string(),
+            source_item_id: "1".to_string(),
+            ..sample_event()
+        };
+        let second = WatchEvent {
+            repo: "acme/web".to_string(),
+            title: "Two".to_string(),
+            source_item_id: "2".to_string(),
+            ..sample_event()
+        };
+        let third = WatchEvent {
+            repo: "acme/mobile".to_string(),
+            title: "Three".to_string(),
+            source_item_id: "3".to_string(),
+            ..sample_event()
+        };
+        let digest = sample_digest(5, vec![first, second, third]);
+
+        let body = build_digest_notification_body(&digest, false);
+
+        assert!(body.contains("5 updates"));
+        assert!(body.contains("- acme/api [pr_created] One by @alice"));
+        assert!(body.contains("- acme/web [pr_created] Two by @alice"));
+        assert!(body.contains("- acme/mobile [pr_created] Three by @alice"));
+        assert!(body.contains("... and 2 more"));
+    }
+
+    #[test]
+    fn digest_notification_body_includes_urls_when_requested() {
+        let digest = sample_digest(2, vec![sample_event(), sample_event()]);
+        let body = build_digest_notification_body(&digest, true);
+        assert!(body.matches("https://example.com/pr/1").count() >= 2);
     }
 
     #[test]

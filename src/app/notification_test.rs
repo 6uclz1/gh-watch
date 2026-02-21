@@ -3,7 +3,7 @@ use chrono::Utc;
 
 use crate::{
     domain::events::{EventKind, WatchEvent},
-    ports::{NotificationDispatchResult, NotifierPort},
+    ports::{NotificationDispatchResult, NotificationPayload, NotifierPort},
 };
 
 #[derive(Debug, Clone)]
@@ -18,7 +18,7 @@ where
 {
     let event = build_test_event();
     let dispatch_result = notifier
-        .notify(&event, true)
+        .notify(&NotificationPayload::Event(event.clone()), true)
         .context("failed to send test notification")?;
 
     Ok(NotificationTestOutcome {

@@ -13,7 +13,8 @@ use gh_watch::{
     domain::events::{EventKind, WatchEvent},
     ports::{
         ClockPort, CursorPort, GhClientPort, NotificationClickSupport, NotificationDispatchResult,
-        NotifierPort, PersistBatchResult, RepoBatchPort, RepoPersistBatch, RetentionPort,
+        NotificationPayload, NotifierPort, PersistBatchResult, RepoBatchPort, RepoPersistBatch,
+        RetentionPort,
     },
 };
 
@@ -249,16 +250,24 @@ impl RepoBatchPort for FakeState {
 
 #[derive(Clone, Default)]
 struct FakeNotifier {
-    sent: Arc<Mutex<Vec<String>>>,
-    fail_once: Arc<Mutex<HashSet<String>>>,
+    sent: Arc<Mutex<Vec<NotificationPayload>>>,
+    fail_once_for_event: Arc<Mutex<HashSet<String>>>,
+    fail_digest_once: Arc<Mutex<bool>>,
 }
 
 impl FakeNotifier {
-    fn fail_once_for(&self, event_key: &str) {
-        self.fail_once.lock().unwrap().insert(event_key.to_string());
+    fn fail_once_for_event(&self, event_key: &str) {
+        self.fail_once_for_event
+            .lock()
+            .unwrap()
+            .insert(event_key.to_string());
     }
 
-    fn sent(&self) -> Vec<String> {
+    fn fail_digest_once(&self) {
+        *self.fail_digest_once.lock().unwrap() = true;
+    }
+
+    fn sent(&self) -> Vec<NotificationPayload> {
         self.sent.lock().unwrap().clone()
     }
 }
@@ -272,12 +281,27 @@ impl NotifierPort for FakeNotifier {
         NotificationClickSupport::Unsupported
     }
 
-    fn notify(&self, event: &WatchEvent, _include_url: bool) -> Result<NotificationDispatchResult> {
-        let key = event.event_key();
-        if self.fail_once.lock().unwrap().remove(&key) {
-            return Err(anyhow!("notify failed once"));
+    fn notify(
+        &self,
+        payload: &NotificationPayload,
+        _include_url: bool,
+    ) -> Result<NotificationDispatchResult> {
+        match payload {
+            NotificationPayload::Event(event) => {
+                let key = event.event_key();
+                if self.fail_once_for_event.lock().unwrap().remove(&key) {
+                    return Err(anyhow!("notify failed once"));
+                }
+            }
+            NotificationPayload::Digest(_) => {
+                let mut fail_once = self.fail_digest_once.lock().unwrap();
+                if *fail_once {
+                    *fail_once = false;
+                    return Err(anyhow!("digest notify failed once"));
+                }
+            }
         }
-        self.sent.lock().unwrap().push(key);
+        self.sent.lock().unwrap().push(payload.clone());
         Ok(NotificationDispatchResult::Delivered)
     }
 }
@@ -399,7 +423,9 @@ async fn non_bootstrap_poll_notifies_new_events() {
         .unwrap();
     assert_eq!(out.bootstrap_repos, 0);
     assert_eq!(out.notified_count, 1);
-    assert_eq!(notifier.sent().len(), 1);
+    let sent = notifier.sent();
+    assert_eq!(sent.len(), 1);
+    assert!(matches!(sent[0], NotificationPayload::Event(_)));
     assert_eq!(state.cleanup_calls.lock().unwrap().len(), 1);
 }
 
@@ -534,6 +560,76 @@ async fn repo_fetch_runs_sequentially() {
 }
 
 #[tokio::test]
+async fn multiple_events_in_single_poll_send_digest_notification_once() {
+    let gh = FakeGh::default();
+    let state = FakeState::default();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 21, 0, 0, 0).unwrap(),
+    };
+
+    state.set_cursor(
+        "acme/api",
+        Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
+    );
+    state.set_cursor(
+        "acme/web",
+        Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
+    );
+
+    let ev_latest = event(
+        "acme/api",
+        "ev-latest",
+        Utc.with_ymd_and_hms(2025, 1, 20, 0, 7, 0).unwrap(),
+    );
+    let ev_tie_api = event(
+        "acme/api",
+        "ev-tie-api",
+        Utc.with_ymd_and_hms(2025, 1, 20, 0, 6, 0).unwrap(),
+    );
+    let ev_tie_web = event(
+        "acme/web",
+        "ev-tie-web",
+        Utc.with_ymd_and_hms(2025, 1, 20, 0, 6, 0).unwrap(),
+    );
+
+    gh.set_events("acme/api", vec![ev_tie_api.clone(), ev_latest.clone()]);
+    gh.set_events("acme/web", vec![ev_tie_web.clone()]);
+
+    let out = poll_once(&cfg(), &gh, &state, &notifier, &clock)
+        .await
+        .expect("poll with multiple events should succeed");
+
+    let expected_keys = vec![
+        ev_latest.event_key(),
+        ev_tie_api.event_key(),
+        ev_tie_web.event_key(),
+    ];
+    let notified_keys = out
+        .notified_events
+        .iter()
+        .map(|event| event.event_key())
+        .collect::<Vec<_>>();
+    assert_eq!(out.notified_count, 1);
+    assert_eq!(notified_keys, expected_keys);
+
+    let sent = notifier.sent();
+    assert_eq!(sent.len(), 1);
+    match &sent[0] {
+        NotificationPayload::Digest(digest) => {
+            assert_eq!(digest.total_events, 3);
+            let sample_keys = digest
+                .sample_events
+                .iter()
+                .map(|event| event.event_key())
+                .collect::<Vec<_>>();
+            assert_eq!(sample_keys, expected_keys);
+        }
+        NotificationPayload::Event(_) => panic!("expected digest payload for multiple events"),
+    }
+}
+
+#[tokio::test]
 async fn notification_failure_returns_error() {
     let gh = FakeGh::default();
     let state = FakeState::default();
@@ -557,12 +653,54 @@ async fn notification_failure_returns_error() {
     );
     gh.set_events("acme/api", vec![ev.clone()]);
     gh.set_events("acme/web", Vec::new());
-    notifier.fail_once_for(&ev.event_key());
+    notifier.fail_once_for_event(&ev.event_key());
 
     let err = poll_once(&cfg(), &gh, &state, &notifier, &clock)
         .await
         .expect_err("notification should fail");
     assert!(err.to_string().contains("notification failed for"));
+}
+
+#[tokio::test]
+async fn digest_notification_failure_returns_error() {
+    let gh = FakeGh::default();
+    let state = FakeState::default();
+    let notifier = FakeNotifier::default();
+    let clock = FixedClock {
+        now: Utc.with_ymd_and_hms(2025, 1, 21, 0, 30, 0).unwrap(),
+    };
+
+    state.set_cursor(
+        "acme/api",
+        Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
+    );
+    state.set_cursor(
+        "acme/web",
+        Utc.with_ymd_and_hms(2025, 1, 20, 0, 0, 0).unwrap(),
+    );
+
+    gh.set_events(
+        "acme/api",
+        vec![event(
+            "acme/api",
+            "ev-digest-a",
+            Utc.with_ymd_and_hms(2025, 1, 21, 0, 10, 0).unwrap(),
+        )],
+    );
+    gh.set_events(
+        "acme/web",
+        vec![event(
+            "acme/web",
+            "ev-digest-b",
+            Utc.with_ymd_and_hms(2025, 1, 21, 0, 11, 0).unwrap(),
+        )],
+    );
+    notifier.fail_digest_once();
+
+    let err = poll_once(&cfg(), &gh, &state, &notifier, &clock)
+        .await
+        .expect_err("digest notification should fail");
+    assert!(err.to_string().contains("digest notification failed"));
 }
 
 #[tokio::test]

@@ -6,7 +6,10 @@ use std::{collections::HashSet, time::Duration as StdDuration};
 use crate::{
     config::Config,
     domain::events::{event_matches_notification_filters, EventKind, WatchEvent},
-    ports::{ClockPort, GhClientPort, NotifierPort, PollStatePort, RepoPersistBatch},
+    ports::{
+        ClockPort, GhClientPort, NotificationDigest, NotificationPayload, NotifierPort,
+        PollStatePort, RepoPersistBatch,
+    },
 };
 
 const POLL_OVERLAP_SECONDS: i64 = 300;
@@ -48,10 +51,9 @@ enum RepoFetchResult {
     },
 }
 
-struct RepoEventProcessingContext<'a, S, N> {
+struct RepoEventProcessingContext<'a, S> {
     config: &'a Config,
     state: &'a S,
-    notifier: &'a N,
     viewer_login: Option<String>,
 }
 
@@ -175,35 +177,33 @@ where
     }
 }
 
-struct RepoBatchProcessor<'a, S, N> {
-    context: RepoEventProcessingContext<'a, S, N>,
+struct RepoBatchProcessor<'a, S> {
+    context: RepoEventProcessingContext<'a, S>,
 }
 
-impl<'a, S, N> RepoBatchProcessor<'a, S, N>
+impl<'a, S> RepoBatchProcessor<'a, S>
 where
     S: PollStatePort,
-    N: NotifierPort,
 {
-    fn new(
-        config: &'a Config,
-        state: &'a S,
-        notifier: &'a N,
-        viewer_login: Option<String>,
-    ) -> Self {
+    fn new(config: &'a Config, state: &'a S, viewer_login: Option<String>) -> Self {
         Self {
             context: RepoEventProcessingContext {
                 config,
                 state,
-                notifier,
                 viewer_login,
             },
         }
     }
 
-    fn apply(&self, outcome: &mut PollOutcome, fetch_result: RepoFetchResult) -> Result<()> {
+    fn apply(
+        &self,
+        outcome: &mut PollOutcome,
+        notify_candidates: &mut Vec<WatchEvent>,
+        fetch_result: RepoFetchResult,
+    ) -> Result<()> {
         match fetch_result {
             RepoFetchResult::Fetched { plan, events } => {
-                self.persist_and_notify(outcome, plan, events)?;
+                self.persist_and_collect(outcome, notify_candidates, plan, events)?;
             }
             RepoFetchResult::Failed {
                 repo_name,
@@ -217,9 +217,10 @@ where
         Ok(())
     }
 
-    fn persist_and_notify(
+    fn persist_and_collect(
         &self,
         outcome: &mut PollOutcome,
+        notify_candidates: &mut Vec<WatchEvent>,
         plan: RepoPollPlan,
         events: Vec<WatchEvent>,
     ) -> Result<()> {
@@ -259,20 +260,15 @@ where
             .into_iter()
             .filter(|event| newly_logged.contains(&event.event_key()))
             .collect::<Vec<_>>();
-        outcome.timeline_events.extend(newly_logged_events.clone());
+        outcome
+            .timeline_events
+            .extend(newly_logged_events.iter().cloned());
 
         if plan.is_bootstrap || !self.context.config.notifications.enabled {
             return Ok(());
         }
 
-        for event in newly_logged_events {
-            self.context
-                .notifier
-                .notify(&event, self.context.config.notifications.include_url)
-                .with_context(|| format!("notification failed for {}", event.event_key()))?;
-            outcome.notified_count += 1;
-            outcome.notified_events.push(event);
-        }
+        notify_candidates.extend(newly_logged_events);
 
         Ok(())
     }
@@ -330,9 +326,10 @@ where
         ..PollOutcome::default()
     };
 
-    let processor = RepoBatchProcessor::new(config, state, notifier, viewer_login);
+    let mut notify_candidates = Vec::new();
+    let processor = RepoBatchProcessor::new(config, state, viewer_login);
     for fetch_result in fetch_results {
-        processor.apply(&mut outcome, fetch_result)?;
+        processor.apply(&mut outcome, &mut notify_candidates, fetch_result)?;
     }
 
     if fetched_repo_count == 0 && !outcome.fetch_failures.is_empty() {
@@ -345,7 +342,61 @@ where
         return Err(anyhow!("all repository fetches failed: {details}"));
     }
 
+    dispatch_notifications(config, notifier, &mut outcome, notify_candidates)?;
+
     Ok(outcome)
+}
+
+fn dispatch_notifications<N>(
+    config: &Config,
+    notifier: &N,
+    outcome: &mut PollOutcome,
+    mut notify_candidates: Vec<WatchEvent>,
+) -> Result<()>
+where
+    N: NotifierPort,
+{
+    if !config.notifications.enabled || notify_candidates.is_empty() {
+        return Ok(());
+    }
+
+    sort_notification_candidates(&mut notify_candidates);
+    outcome.notified_events = notify_candidates.clone();
+
+    let include_url = config.notifications.include_url;
+    if notify_candidates.len() == 1 {
+        let event = notify_candidates
+            .into_iter()
+            .next()
+            .expect("single candidate must exist");
+        notifier
+            .notify(&NotificationPayload::Event(event.clone()), include_url)
+            .with_context(|| format!("notification failed for {}", event.event_key()))?;
+    } else {
+        let digest = NotificationDigest {
+            total_events: notify_candidates.len(),
+            sample_events: notify_candidates.iter().take(3).cloned().collect(),
+        };
+        notifier
+            .notify(&NotificationPayload::Digest(digest), include_url)
+            .with_context(|| {
+                format!(
+                    "digest notification failed for {} events",
+                    notify_candidates.len()
+                )
+            })?;
+    }
+
+    outcome.notified_count += 1;
+    Ok(())
+}
+
+fn sort_notification_candidates(events: &mut [WatchEvent]) {
+    events.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.event_key().cmp(&b.event_key()))
+    });
 }
 
 fn bootstrap_since(now: chrono::DateTime<Utc>, lookback_hours: u64) -> chrono::DateTime<Utc> {
